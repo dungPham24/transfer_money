@@ -3,48 +3,89 @@ package commonlib.transfer_money.api.exception;
 import commonlib.transfer_money.domain.exception.IdempotencyConflictException;
 import commonlib.transfer_money.domain.exception.InsufficientFundsException;
 import commonlib.transfer_money.domain.exception.SameWalletTransferException;
+import commonlib.transfer_money.domain.exception.ValidationException;
 import commonlib.transfer_money.domain.exception.WalletNotFoundException;
+import jakarta.validation.ConstraintViolationException;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.util.List;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(WalletNotFoundException.class)
-    ProblemDetail handleNotFound(WalletNotFoundException ex) {
-        return problem(HttpStatus.NOT_FOUND, "WALLET_NOT_FOUND", ex.getMessage());
+    ResponseEntity<ApiError> handleNotFound(WalletNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiError.of("WALLET_NOT_FOUND", ex.getMessage()));
     }
 
+    // 422 not 409: the request is well-formed and understood, but the current wallet
+    // state prevents processing (business rule). 409 is reserved for concurrent-request
+    // conflicts (e.g. idempotency key collision).
     @ExceptionHandler(InsufficientFundsException.class)
-    ProblemDetail handleInsufficientFunds(InsufficientFundsException ex) {
-        return problem(HttpStatus.UNPROCESSABLE_ENTITY, "INSUFFICIENT_FUNDS", ex.getMessage());
+    ResponseEntity<ApiError> handleInsufficientFunds(InsufficientFundsException ex) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(ApiError.of("INSUFFICIENT_FUNDS", ex.getMessage()));
     }
 
     @ExceptionHandler(IdempotencyConflictException.class)
-    ProblemDetail handleIdempotencyConflict(IdempotencyConflictException ex) {
-        return problem(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", ex.getMessage());
+    ResponseEntity<ApiError> handleIdempotencyConflict(IdempotencyConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ApiError.of("IDEMPOTENCY_CONFLICT", ex.getMessage()));
     }
 
     @ExceptionHandler(SameWalletTransferException.class)
-    ProblemDetail handleSameWallet(SameWalletTransferException ex) {
-        return problem(HttpStatus.BAD_REQUEST, "SAME_WALLET", ex.getMessage());
+    ResponseEntity<ApiError> handleSameWallet(SameWalletTransferException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ApiError.of("SAME_WALLET_TRANSFER", ex.getMessage()));
     }
 
+    // Domain-level business rule violations (e.g. currency mismatch, invalid state transition)
+    @ExceptionHandler(ValidationException.class)
+    ResponseEntity<ApiError> handleDomainValidation(ValidationException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ApiError.of("VALIDATION_ERROR", ex.getMessage(), ex.getDetails()));
+    }
+
+    // Jakarta Bean Validation on @RequestBody fields
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
-        String detail = ex.getBindingResult().getFieldErrors().stream()
+    ResponseEntity<ApiError> handleBeanValidation(MethodArgumentNotValidException ex) {
+        List<String> details = ex.getBindingResult().getFieldErrors().stream()
                 .map(e -> e.getField() + ": " + e.getDefaultMessage())
-                .reduce((a, b) -> a + "; " + b)
-                .orElse("Validation failed");
-        return problem(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", detail);
+                .toList();
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ApiError.of("VALIDATION_ERROR", "Request validation failed", details));
     }
 
-    private ProblemDetail problem(HttpStatus status, String errorCode, String detail) {
-        ProblemDetail pd = ProblemDetail.forStatusAndDetail(status, detail);
-        pd.setProperty("errorCode", errorCode);
-        return pd;
+    // Jakarta Bean Validation on @RequestParam / @PathVariable in @Validated controllers
+    @ExceptionHandler(ConstraintViolationException.class)
+    ResponseEntity<ApiError> handleConstraintViolation(ConstraintViolationException ex) {
+        List<String> details = ex.getConstraintViolations().stream()
+                .map(v -> {
+                    String path = v.getPropertyPath().toString();
+                    int dot = path.lastIndexOf('.');
+                    return (dot >= 0 ? path.substring(dot + 1) : path) + ": " + v.getMessage();
+                })
+                .toList();
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ApiError.of("VALIDATION_ERROR", "Request validation failed", details));
+    }
+
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    ResponseEntity<ApiError> handleMissingHeader(MissingRequestHeaderException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ApiError.of("MISSING_HEADER",
+                        "Required header '" + ex.getHeaderName() + "' is missing"));
+    }
+
+    @ExceptionHandler(Exception.class)
+    ResponseEntity<ApiError> handleUnexpected(Exception ex) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(ApiError.of("INTERNAL_ERROR", "An unexpected error occurred"));
     }
 }
