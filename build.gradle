@@ -38,6 +38,10 @@ dependencies {
     // OpenAPI / Swagger UI
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.9'
 
+    // Structured JSON logging — encodes logback events as JSON (ELK/Splunk compatible)
+    // Uses SLF4J 2.x key-value pairs natively; no logstash imports needed in business code.
+    implementation 'net.logstash.logback:logstash-logback-encoder:8.0'
+
     // Lombok
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'

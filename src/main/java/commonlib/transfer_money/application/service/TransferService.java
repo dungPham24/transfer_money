@@ -13,6 +13,7 @@ import commonlib.transfer_money.domain.model.Transfer;
 import commonlib.transfer_money.domain.model.Wallet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,6 +26,7 @@ import java.util.UUID;
 public class TransferService implements TransferFundsUseCase {
 
     private static final Logger log = LoggerFactory.getLogger(TransferService.class);
+    private static final String MDC_TRANSFER_ID = "transferId";
 
     private final WalletRepository walletRepository;
     private final TransferRepository transferRepository;
@@ -59,8 +61,15 @@ public class TransferService implements TransferFundsUseCase {
     public Transfer transfer(String idempotencyKey, UUID sourceWalletId, UUID destWalletId,
                              BigDecimal amount, String currency) {
 
-        log.info("transfer.start idempotencyKey={} src={} dst={} amount={} currency={}",
-                idempotencyKey, sourceWalletId, destWalletId, amount, currency);
+        // Structured log — SLF4J 2.x key-value pairs become separate JSON fields in prod.
+        // idempotencyKey and wallet IDs are safe to log; do NOT log balances or owner names.
+        log.atInfo()
+                .addKeyValue("idempotencyKey", idempotencyKey)
+                .addKeyValue("sourceWalletId", sourceWalletId)
+                .addKeyValue("destWalletId", destWalletId)
+                .addKeyValue("amount", amount.toPlainString())
+                .addKeyValue("currency", currency)
+                .log("transfer.received");
 
         if (sourceWalletId.equals(destWalletId)) {
             throw new SameWalletTransferException();
@@ -71,7 +80,11 @@ public class TransferService implements TransferFundsUseCase {
         if (existing.isPresent()) {
             Transfer t = existing.get();
             assertSamePayload(t, sourceWalletId, destWalletId, amount, currency);
-            log.info("transfer.idempotent_replay idempotencyKey={} transferId={}", idempotencyKey, t.getId());
+            log.atInfo()
+                    .addKeyValue("idempotencyKey", idempotencyKey)
+                    .addKeyValue("transferId", t.getId())
+                    .addKeyValue("outcome", "IDEMPOTENT_REPLAY")
+                    .log("transfer.completed");
             return t;
         }
 
@@ -88,22 +101,27 @@ public class TransferService implements TransferFundsUseCase {
         Wallet dest   = first.getId().equals(destWalletId)   ? first : second;
 
         // ── Layer 2: DB-enforced idempotency (concurrent requests) ───────────────
-        // insertPendingOrThrowDuplicate runs in REQUIRES_NEW.
-        // If a concurrent request wins the INSERT race, the sub-tx rolls back and
-        // DuplicateTransferKeyException is thrown — our outer tx is still alive.
         Transfer transfer = Transfer.create(idempotencyKey, sourceWalletId, destWalletId, amount, currency);
+
+        // Put transferId in MDC now — all subsequent log lines in this request will carry it.
+        MDC.put(MDC_TRANSFER_ID, transfer.getId().toString());
+
         try {
             transferRepository.insertPendingOrThrowDuplicate(transfer);
         } catch (DuplicateTransferKeyException e) {
-            log.info("transfer.concurrent_duplicate idempotencyKey={} — returning committed result", idempotencyKey);
             Transfer committed = transferRepository.findByIdempotencyKey(idempotencyKey)
                     .orElseThrow(() -> new IllegalStateException("Transfer missing after duplicate key signal", e));
             assertSamePayload(committed, sourceWalletId, destWalletId, amount, currency);
+            log.atInfo()
+                    .addKeyValue("idempotencyKey", idempotencyKey)
+                    .addKeyValue("transferId", committed.getId())
+                    .addKeyValue("outcome", "CONCURRENT_DUPLICATE")
+                    .log("transfer.completed");
             return committed;
         }
 
         // ── Money movement (within the outer @Transactional) ──────────────────────
-        source.debit(amount);   // InsufficientFundsException if balance < amount
+        source.debit(amount);   // throws InsufficientFundsException if balance < amount
         dest.credit(amount);
 
         walletRepository.save(source);
@@ -117,7 +135,11 @@ public class TransferService implements TransferFundsUseCase {
         transfer.complete();
         Transfer saved = transferRepository.save(transfer);
 
-        log.info("transfer.complete transferId={} idempotencyKey={}", saved.getId(), idempotencyKey);
+        log.atInfo()
+                .addKeyValue("transferId", saved.getId())
+                .addKeyValue("idempotencyKey", idempotencyKey)
+                .addKeyValue("outcome", "COMPLETED")
+                .log("transfer.completed");
         return saved;
     }
 

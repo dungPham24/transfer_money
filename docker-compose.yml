@@ -28,6 +28,9 @@ services:
       SPRING_DATASOURCE_URL:      jdbc:postgresql://db:5432/${DB_NAME:-wallet_db}
       SPRING_DATASOURCE_USERNAME: ${DB_USER:-wallet_user}
       SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-wallet_pass}
+      # Activates the "prod" logback-spring.xml profile → JSON log output on stdout.
+      # `docker compose logs -f app` then streams one JSON object per line.
+      SPRING_PROFILES_ACTIVE:     prod
     depends_on:
       db:
         condition: service_healthy   # app starts only after postgres accepts connections

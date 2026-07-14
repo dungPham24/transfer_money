@@ -6,6 +6,8 @@ import commonlib.transfer_money.domain.exception.SameWalletTransferException;
 import commonlib.transfer_money.domain.exception.ValidationException;
 import commonlib.transfer_money.domain.exception.WalletNotFoundException;
 import jakarta.validation.ConstraintViolationException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -18,8 +20,14 @@ import java.util.List;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
     @ExceptionHandler(WalletNotFoundException.class)
     ResponseEntity<ApiError> handleNotFound(WalletNotFoundException ex) {
+        log.atWarn()
+                .addKeyValue("outcome", "FAILED")
+                .addKeyValue("reason", "WALLET_NOT_FOUND")
+                .log("transfer.failed");
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(ApiError.of("WALLET_NOT_FOUND", ex.getMessage()));
     }
@@ -29,18 +37,30 @@ public class GlobalExceptionHandler {
     // conflicts (e.g. idempotency key collision).
     @ExceptionHandler(InsufficientFundsException.class)
     ResponseEntity<ApiError> handleInsufficientFunds(InsufficientFundsException ex) {
+        log.atWarn()
+                .addKeyValue("outcome", "FAILED")
+                .addKeyValue("reason", "INSUFFICIENT_FUNDS")
+                .log("transfer.failed");
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(ApiError.of("INSUFFICIENT_FUNDS", ex.getMessage()));
     }
 
     @ExceptionHandler(IdempotencyConflictException.class)
     ResponseEntity<ApiError> handleIdempotencyConflict(IdempotencyConflictException ex) {
+        log.atWarn()
+                .addKeyValue("outcome", "FAILED")
+                .addKeyValue("reason", "IDEMPOTENCY_CONFLICT")
+                .log("transfer.failed");
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(ApiError.of("IDEMPOTENCY_CONFLICT", ex.getMessage()));
     }
 
     @ExceptionHandler(SameWalletTransferException.class)
     ResponseEntity<ApiError> handleSameWallet(SameWalletTransferException ex) {
+        log.atWarn()
+                .addKeyValue("outcome", "FAILED")
+                .addKeyValue("reason", "SAME_WALLET_TRANSFER")
+                .log("transfer.failed");
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(ApiError.of("SAME_WALLET_TRANSFER", ex.getMessage()));
     }
@@ -85,6 +105,11 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<ApiError> handleUnexpected(Exception ex) {
+        log.atError()
+                .addKeyValue("outcome", "FAILED")
+                .addKeyValue("reason", "INTERNAL_ERROR")
+                .setCause(ex)
+                .log("transfer.failed");
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(ApiError.of("INTERNAL_ERROR", "An unexpected error occurred"));
     }

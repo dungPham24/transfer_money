@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!--
+        Two appenders, activated by Spring profile:
+          default (local dev) → CONSOLE_TEXT: human-readable, includes [requestId] + key-value pairs
+          prod   (Docker)     → CONSOLE_JSON: LogstashEncoder, one JSON object per line
+
+        MDC fields (requestId, transferId) appear automatically in both formats.
+        SLF4J 2.x key-value pairs appear as %kvp in text and as top-level JSON fields in JSON.
+    -->
+
+    <!-- ── Human-readable (local dev) ───────────────────────────────────── -->
+    <appender name="CONSOLE_TEXT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%X{requestId:-no-id}] %logger{36} - %msg %kvp%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- ── Structured JSON (Docker / prod) ───────────────────────────────── -->
+    <appender name="CONSOLE_JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!--
+                Rename default Logstash fields to something cleaner.
+                MDC keys (requestId, transferId) and SLF4J 2.x key-value pairs
+                are automatically promoted to top-level JSON fields.
+            -->
+            <fieldNames>
+                <timestamp>timestamp</timestamp>
+                <message>message</message>
+                <logger>logger</logger>
+                <thread>thread</thread>
+                <level>level</level>
+                <levelValue>[ignore]</levelValue>
+                <version>[ignore]</version>
+            </fieldNames>
+        </encoder>
+    </appender>
+
+    <!-- ── Profile: default (local dev) ─────────────────────────────────── -->
+    <springProfile name="!prod">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_TEXT" />
+        </root>
+    </springProfile>
+
+    <!-- ── Profile: prod (Docker Compose, CI, staging) ──────────────────── -->
+    <springProfile name="prod">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_JSON" />
+        </root>
+    </springProfile>
+
+</configuration>
