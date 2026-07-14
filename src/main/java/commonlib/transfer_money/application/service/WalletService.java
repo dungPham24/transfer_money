@@ -1,5 +1,6 @@
 package commonlib.transfer_money.application.service;
 
+import commonlib.transfer_money.application.PageResult;
 import commonlib.transfer_money.application.port.in.CreateWalletUseCase;
 import commonlib.transfer_money.application.port.in.GetWalletUseCase;
 import commonlib.transfer_money.application.port.out.LedgerEntryRepository;
@@ -10,7 +11,6 @@ import commonlib.transfer_money.domain.model.Wallet;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
 import java.util.UUID;
 
 @Service
@@ -39,10 +39,11 @@ public class WalletService implements CreateWalletUseCase, GetWalletUseCase {
     }
 
     @Override
-    public List<LedgerEntry> getTransactionHistory(UUID walletId) {
+    public PageResult<LedgerEntry> getTransactionHistory(UUID walletId, int page, int size) {
+        // Fail fast with a clear 404 before hitting the ledger query
         if (walletRepository.findById(walletId).isEmpty()) {
             throw new WalletNotFoundException(walletId);
         }
-        return ledgerEntryRepository.findByWalletIdOrderByCreatedAtDesc(walletId);
+        return ledgerEntryRepository.findByWalletIdOrderByCreatedAtDesc(walletId, page, size);
     }
 }

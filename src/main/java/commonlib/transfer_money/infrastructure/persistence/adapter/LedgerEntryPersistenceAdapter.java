@@ -1,9 +1,12 @@
 package commonlib.transfer_money.infrastructure.persistence.adapter;
 
+import commonlib.transfer_money.application.PageResult;
 import commonlib.transfer_money.application.port.out.LedgerEntryRepository;
 import commonlib.transfer_money.domain.model.LedgerEntry;
 import commonlib.transfer_money.infrastructure.persistence.entity.LedgerEntryJpaEntity;
 import commonlib.transfer_money.infrastructure.persistence.repository.LedgerEntryJpaRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -24,9 +27,18 @@ public class LedgerEntryPersistenceAdapter implements LedgerEntryRepository {
     }
 
     @Override
-    public List<LedgerEntry> findByWalletIdOrderByCreatedAtDesc(UUID walletId) {
-        return jpaRepository.findByWalletIdOrderByCreatedAtDesc(walletId)
-                .stream().map(this::toDomain).toList();
+    public PageResult<LedgerEntry> findByWalletIdOrderByCreatedAtDesc(UUID walletId, int page, int size) {
+        // Spring's Pageable stays inside the adapter — the port interface uses primitives
+        Page<LedgerEntryJpaEntity> jpaPage = jpaRepository
+                .findByWalletIdOrderByCreatedAtDesc(walletId, PageRequest.of(page, size));
+
+        return new PageResult<>(
+                jpaPage.getContent().stream().map(this::toDomain).toList(),
+                jpaPage.getTotalElements(),
+                jpaPage.getTotalPages(),
+                page,
+                size
+        );
     }
 
     private LedgerEntryJpaEntity toEntity(LedgerEntry e) {
