@@ -74,26 +74,67 @@ class TransferIntegrationTest {
 
     // ── Idempotency: same key twice moves money exactly once ─────────────────
 
+    /**
+     * Core idempotency test (sequential): same request sent twice must produce
+     * exactly one transfer record, one pair of ledger entries, and one balance change.
+     * The second response must be identical to the first.
+     */
     @Test
     void transfer_sameIdempotencyKeyTwice_movesMoneyOnce() {
         UUID sourceId = seedWallet("Alice", "USD", new BigDecimal("100.00"));
         UUID destId   = seedWallet("Bob",   "USD", BigDecimal.ZERO);
         String idemKey = UUID.randomUUID().toString();
 
+        // ── Send the same request twice (synchronous, sequential) ───────────
         ResponseEntity<TransferResponse> first  = doTransfer(idemKey, sourceId, destId, new BigDecimal("40.00"), "USD");
         ResponseEntity<TransferResponse> second = doTransfer(idemKey, sourceId, destId, new BigDecimal("40.00"), "USD");
 
+        // ── Same HTTP status ─────────────────────────────────────────────────
         assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CREATED);
 
-        // Same transfer ID returned both times
-        assertThat(second.getBody().id()).isEqualTo(first.getBody().id());
+        TransferResponse r1 = first.getBody();
+        TransferResponse r2 = second.getBody();
+        assertThat(r1).isNotNull();
+        assertThat(r2).isNotNull();
 
-        // Money moved ONCE: source $60, dest $40 — not $20/$80
+        // ── Response of second call is identical to first (same transfer) ────
+        assertThat(r2.id()).isEqualTo(r1.id());
+        assertThat(r2.idempotencyKey()).isEqualTo(r1.idempotencyKey());
+        assertThat(r2.sourceWalletId()).isEqualTo(r1.sourceWalletId());
+        assertThat(r2.destWalletId()).isEqualTo(r1.destWalletId());
+        assertThat(r2.amount()).isEqualByComparingTo(r1.amount());
+        assertThat(r2.currency()).isEqualTo(r1.currency());
+        assertThat(r2.status()).isEqualTo(r1.status());
+        assertThat(r2.completedAt()).isEqualTo(r1.completedAt());
+
+        // ── Exactly 1 transfer record in DB for this idempotency key ────────
+        Integer transferCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM transfers WHERE idempotency_key = ?",
+                Integer.class, idemKey);
+        assertThat(transferCount).isEqualTo(1);
+
+        // ── Exactly 2 ledger entries (1 DEBIT + 1 CREDIT) for this transfer ─
+        Integer ledgerCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE transfer_id = ?::uuid",
+                Integer.class, r1.id().toString());
+        assertThat(ledgerCount).isEqualTo(2);
+
+        Integer debitCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE transfer_id = ?::uuid AND entry_type = 'DEBIT'",
+                Integer.class, r1.id().toString());
+        assertThat(debitCount).isEqualTo(1);
+
+        Integer creditCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_entries WHERE transfer_id = ?::uuid AND entry_type = 'CREDIT'",
+                Integer.class, r1.id().toString());
+        assertThat(creditCount).isEqualTo(1);
+
+        // ── Money moved ONCE: source $60, dest $40 — not $20/$80 ────────────
         assertThat(getBalance(sourceId)).isEqualByComparingTo("60.00");
         assertThat(getBalance(destId)).isEqualByComparingTo("40.00");
 
-        // Ledger balanced after single movement
+        // ── Ledger reconciles for both wallets ───────────────────────────────
         assertReconciled(sourceId);
         assertReconciled(destId);
     }

@@ -4,6 +4,7 @@ import commonlib.transfer_money.application.port.in.TransferFundsUseCase;
 import commonlib.transfer_money.application.port.out.LedgerEntryRepository;
 import commonlib.transfer_money.application.port.out.TransferRepository;
 import commonlib.transfer_money.application.port.out.WalletRepository;
+import commonlib.transfer_money.domain.exception.DuplicateTransferKeyException;
 import commonlib.transfer_money.domain.exception.IdempotencyConflictException;
 import commonlib.transfer_money.domain.exception.SameWalletTransferException;
 import commonlib.transfer_money.domain.exception.WalletNotFoundException;
@@ -38,14 +39,20 @@ public class TransferService implements TransferFundsUseCase {
     }
 
     /**
-     * Moves money atomically. Concurrency safety:
-     *   1. Both wallet rows are locked with SELECT FOR UPDATE in a fixed UUID order to prevent deadlocks.
-     *   2. Wallet.debit() enforces the no-overdraw rule at the domain level.
-     *   3. wallets.balance CHECK (balance >= 0) is the DB-level hard stop.
+     * Idempotency is guaranteed at two layers:
      *
-     * Idempotency:
-     *   - UNIQUE (idempotency_key) means the first INSERT wins; duplicate → load & return existing.
-     *   - Payload is re-validated against the stored transfer to catch accidental key reuse.
+     *  Layer 1 — application check (handles sequential retries, the common case):
+     *    findByIdempotencyKey() before doing any work. If found, validate payload and return.
+     *
+     *  Layer 2 — DB constraint (handles concurrent requests racing to INSERT):
+     *    insertPendingOrThrowDuplicate() runs in a REQUIRES_NEW sub-transaction.
+     *    If a concurrent request already committed the same key, the sub-tx rolls back
+     *    and throws DuplicateTransferKeyException. The outer @Transactional is still alive
+     *    (only the sub-tx was poisoned), so we can re-read and return the existing transfer.
+     *
+     * Concurrency / overdraw prevention:
+     *    Both wallet rows are locked with SELECT FOR UPDATE in fixed UUID order → no deadlock.
+     *    Wallet.debit() + CHECK (balance >= 0) are the dual safety nets.
      */
     @Override
     @Transactional
@@ -59,7 +66,7 @@ public class TransferService implements TransferFundsUseCase {
             throw new SameWalletTransferException();
         }
 
-        // ── Idempotency check ────────────────────────────────────────────────
+        // ── Layer 1: application-level idempotency check (sequential retries) ──
         Optional<Transfer> existing = transferRepository.findByIdempotencyKey(idempotencyKey);
         if (existing.isPresent()) {
             Transfer t = existing.get();
@@ -68,7 +75,7 @@ public class TransferService implements TransferFundsUseCase {
             return t;
         }
 
-        // ── Acquire pessimistic locks in deterministic order (avoids deadlock) ─
+        // ── Acquire pessimistic locks in deterministic UUID order (prevents deadlock) ──
         UUID firstId  = sourceWalletId.compareTo(destWalletId) < 0 ? sourceWalletId : destWalletId;
         UUID secondId = sourceWalletId.compareTo(destWalletId) < 0 ? destWalletId   : sourceWalletId;
 
@@ -80,11 +87,23 @@ public class TransferService implements TransferFundsUseCase {
         Wallet source = first.getId().equals(sourceWalletId) ? first : second;
         Wallet dest   = first.getId().equals(destWalletId)   ? first : second;
 
-        // ── Record transfer as PENDING, then apply domain logic ──────────────
+        // ── Layer 2: DB-enforced idempotency (concurrent requests) ───────────────
+        // insertPendingOrThrowDuplicate runs in REQUIRES_NEW.
+        // If a concurrent request wins the INSERT race, the sub-tx rolls back and
+        // DuplicateTransferKeyException is thrown — our outer tx is still alive.
         Transfer transfer = Transfer.create(idempotencyKey, sourceWalletId, destWalletId, amount, currency);
-        transferRepository.save(transfer);
+        try {
+            transferRepository.insertPendingOrThrowDuplicate(transfer);
+        } catch (DuplicateTransferKeyException e) {
+            log.info("transfer.concurrent_duplicate idempotencyKey={} — returning committed result", idempotencyKey);
+            Transfer committed = transferRepository.findByIdempotencyKey(idempotencyKey)
+                    .orElseThrow(() -> new IllegalStateException("Transfer missing after duplicate key signal", e));
+            assertSamePayload(committed, sourceWalletId, destWalletId, amount, currency);
+            return committed;
+        }
 
-        source.debit(amount);   // throws InsufficientFundsException if balance < amount
+        // ── Money movement (within the outer @Transactional) ──────────────────────
+        source.debit(amount);   // InsufficientFundsException if balance < amount
         dest.credit(amount);
 
         walletRepository.save(source);

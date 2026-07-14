@@ -3,6 +3,7 @@ package commonlib.transfer_money.application.service;
 import commonlib.transfer_money.application.port.out.LedgerEntryRepository;
 import commonlib.transfer_money.application.port.out.TransferRepository;
 import commonlib.transfer_money.application.port.out.WalletRepository;
+import commonlib.transfer_money.domain.exception.DuplicateTransferKeyException;
 import commonlib.transfer_money.domain.exception.IdempotencyConflictException;
 import commonlib.transfer_money.domain.exception.InsufficientFundsException;
 import commonlib.transfer_money.domain.exception.SameWalletTransferException;
@@ -29,6 +30,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 
 @ExtendWith(MockitoExtension.class)
 class TransferServiceTest {
@@ -90,19 +93,44 @@ class TransferServiceTest {
     }
 
     @Test
-    void transfer_savesTransferTwice_pendingThenCompleted() {
+    void transfer_insertsPendingThenSavesCompleted() {
         stubLocksAndSaves();
 
         transferService.transfer("key-1", SOURCE_ID, DEST_ID, new BigDecimal("10.00"), "USD");
 
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<Transfer> captor = ArgumentCaptor.forClass(Transfer.class);
-        verify(transferRepository, times(2)).save(captor.capture());
+        // Step 1: insertPendingOrThrowDuplicate called with PENDING status
+        ArgumentCaptor<Transfer> pendingCaptor = ArgumentCaptor.forClass(Transfer.class);
+        verify(transferRepository).insertPendingOrThrowDuplicate(pendingCaptor.capture());
+        assertThat(pendingCaptor.getValue().getStatus()).isEqualTo(TransferStatus.PENDING);
 
-        List<Transfer> saves = captor.getAllValues();
-        assertThat(saves.get(0).getStatus()).isEqualTo(TransferStatus.PENDING);
-        assertThat(saves.get(1).getStatus()).isEqualTo(TransferStatus.COMPLETED);
-        assertThat(saves.get(1).getCompletedAt()).isNotNull();
+        // Step 2: save() called once, with COMPLETED status
+        ArgumentCaptor<Transfer> completedCaptor = ArgumentCaptor.forClass(Transfer.class);
+        verify(transferRepository, times(1)).save(completedCaptor.capture());
+        assertThat(completedCaptor.getValue().getStatus()).isEqualTo(TransferStatus.COMPLETED);
+        assertThat(completedCaptor.getValue().getCompletedAt()).isNotNull();
+    }
+
+    @Test
+    void transfer_concurrentDuplicate_returnsExistingTransferWithoutMovingMoney() {
+        // Simulate the race: insertPendingOrThrowDuplicate signals a concurrent commit
+        Transfer alreadyCommitted = Transfer.create("key-race", SOURCE_ID, DEST_ID, new BigDecimal("30.00"), "USD");
+        alreadyCommitted.complete();
+
+        when(transferRepository.findByIdempotencyKey("key-race")).thenReturn(Optional.empty()); // passes layer-1 check
+        when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet));
+        when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(destWallet));
+        doThrow(new DuplicateTransferKeyException("key-race"))
+                .when(transferRepository).insertPendingOrThrowDuplicate(any());
+        // After the exception, the service re-reads the committed transfer
+        when(transferRepository.findByIdempotencyKey("key-race")).thenReturn(Optional.of(alreadyCommitted));
+
+        Transfer result = transferService.transfer("key-race", SOURCE_ID, DEST_ID, new BigDecimal("30.00"), "USD");
+
+        assertThat(result.getId()).isEqualTo(alreadyCommitted.getId());
+        assertThat(result.getStatus()).isEqualTo(TransferStatus.COMPLETED);
+        // No money moved — no wallet or ledger writes
+        verify(walletRepository, never()).save(any());
+        verifyNoInteractions(ledgerEntryRepository);
     }
 
     // ── Idempotency ─────────────────────────────────────────────────────────
@@ -151,6 +179,7 @@ class TransferServiceTest {
         when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
         when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet));
         when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(destWallet));
+        doNothing().when(transferRepository).insertPendingOrThrowDuplicate(any());
         when(transferRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         // Source has $100, requesting $200
@@ -213,6 +242,7 @@ class TransferServiceTest {
         when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
         when(walletRepository.findByIdForUpdate(smallId)).thenReturn(Optional.of(small));
         when(walletRepository.findByIdForUpdate(largeId)).thenReturn(Optional.of(large));
+        doNothing().when(transferRepository).insertPendingOrThrowDuplicate(any());
         when(transferRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(walletRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -230,6 +260,7 @@ class TransferServiceTest {
         when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
         when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet));
         when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(destWallet));
+        doNothing().when(transferRepository).insertPendingOrThrowDuplicate(any());
         when(transferRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         when(walletRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
     }

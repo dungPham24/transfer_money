@@ -13,9 +13,12 @@ import java.util.Optional;
 public class TransferPersistenceAdapter implements TransferRepository {
 
     private final TransferJpaRepository jpaRepository;
+    private final IdempotentTransferInserter idempotentInserter;
 
-    public TransferPersistenceAdapter(TransferJpaRepository jpaRepository) {
+    public TransferPersistenceAdapter(TransferJpaRepository jpaRepository,
+                                      IdempotentTransferInserter idempotentInserter) {
         this.jpaRepository = jpaRepository;
+        this.idempotentInserter = idempotentInserter;
     }
 
     @Override
@@ -26,6 +29,15 @@ public class TransferPersistenceAdapter implements TransferRepository {
     @Override
     public Optional<Transfer> findByIdempotencyKey(String idempotencyKey) {
         return jpaRepository.findByIdempotencyKey(idempotencyKey).map(this::toDomain);
+    }
+
+    /**
+     * Delegates to IdempotentTransferInserter which runs in REQUIRES_NEW.
+     * DuplicateTransferKeyException propagates to TransferService on constraint violation.
+     */
+    @Override
+    public void insertPendingOrThrowDuplicate(Transfer transfer) {
+        idempotentInserter.insertPending(toEntity(transfer));
     }
 
     private TransferJpaEntity toEntity(Transfer t) {
