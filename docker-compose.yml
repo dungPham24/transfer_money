@@ -1,31 +1,37 @@
 services:
+
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: wallet_db
-      POSTGRES_USER: wallet_user
-      POSTGRES_PASSWORD: wallet_pass
+      POSTGRES_DB:       ${DB_NAME:-wallet_db}
+      POSTGRES_USER:     ${DB_USER:-wallet_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-wallet_pass}
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wallet_user -d wallet_db"]
+      # $$VAR is docker-compose escape for $VAR — resolved inside the container
+      # where POSTGRES_USER / POSTGRES_DB are already set by the image.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
+    restart: unless-stopped
 
   app:
     build: .
     ports:
-      - "8080:8080"
+      - "${APP_PORT:-8080}:8080"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/wallet_db
-      SPRING_DATASOURCE_USERNAME: wallet_user
-      SPRING_DATASOURCE_PASSWORD: wallet_pass
+      SPRING_DATASOURCE_URL:      jdbc:postgresql://db:5432/${DB_NAME:-wallet_db}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER:-wallet_user}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-wallet_pass}
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_healthy   # app starts only after postgres accepts connections
+    restart: on-failure
 
 volumes:
   pg_data:
