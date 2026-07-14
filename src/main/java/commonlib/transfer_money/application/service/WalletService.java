@@ -1,6 +1,7 @@
 package commonlib.transfer_money.application.service;
 
 import commonlib.transfer_money.application.PageResult;
+import commonlib.transfer_money.application.ReconcileResult;
 import commonlib.transfer_money.application.port.in.CreateWalletUseCase;
 import commonlib.transfer_money.application.port.in.GetWalletUseCase;
 import commonlib.transfer_money.application.port.out.LedgerEntryRepository;
@@ -11,6 +12,7 @@ import commonlib.transfer_money.domain.model.Wallet;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.util.UUID;
 
 @Service
@@ -40,10 +42,24 @@ public class WalletService implements CreateWalletUseCase, GetWalletUseCase {
 
     @Override
     public PageResult<LedgerEntry> getTransactionHistory(UUID walletId, int page, int size) {
-        // Fail fast with a clear 404 before hitting the ledger query
         if (walletRepository.findById(walletId).isEmpty()) {
             throw new WalletNotFoundException(walletId);
         }
         return ledgerEntryRepository.findByWalletIdOrderByCreatedAtDesc(walletId, page, size);
+    }
+
+    /**
+     * Audit method: reads wallet.balance (cached) and SUM(ledger_entries) in the same
+     * read-only transaction to get a consistent snapshot. balanced == true means the
+     * double-entry ledger is perfectly in sync with the cached balance column.
+     * Used in tests to verify data integrity after transfers.
+     */
+    @Override
+    public ReconcileResult reconcile(UUID walletId) {
+        Wallet wallet = walletRepository.findById(walletId)
+                .orElseThrow(() -> new WalletNotFoundException(walletId));
+        BigDecimal ledgerBalance = ledgerEntryRepository.calculateLedgerBalance(walletId);
+        boolean balanced = wallet.getBalance().compareTo(ledgerBalance) == 0;
+        return new ReconcileResult(walletId, ledgerBalance, wallet.getBalance(), balanced);
     }
 }

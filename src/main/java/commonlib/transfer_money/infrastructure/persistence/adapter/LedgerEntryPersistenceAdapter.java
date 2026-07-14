@@ -9,6 +9,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
 
@@ -28,10 +29,8 @@ public class LedgerEntryPersistenceAdapter implements LedgerEntryRepository {
 
     @Override
     public PageResult<LedgerEntry> findByWalletIdOrderByCreatedAtDesc(UUID walletId, int page, int size) {
-        // Spring's Pageable stays inside the adapter — the port interface uses primitives
         Page<LedgerEntryJpaEntity> jpaPage = jpaRepository
                 .findByWalletIdOrderByCreatedAtDesc(walletId, PageRequest.of(page, size));
-
         return new PageResult<>(
                 jpaPage.getContent().stream().map(this::toDomain).toList(),
                 jpaPage.getTotalElements(),
@@ -39,6 +38,11 @@ public class LedgerEntryPersistenceAdapter implements LedgerEntryRepository {
                 page,
                 size
         );
+    }
+
+    @Override
+    public BigDecimal calculateLedgerBalance(UUID walletId) {
+        return jpaRepository.calculateLedgerBalance(walletId);
     }
 
     private LedgerEntryJpaEntity toEntity(LedgerEntry e) {
