@@ -8,7 +8,12 @@ CREATE TABLE outbox_events (
     id           UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
     event_type   VARCHAR(100)  NOT NULL,
     aggregate_id UUID          NOT NULL,    -- transferId for TRANSFER_COMPLETED events
-    payload      JSONB         NOT NULL,
+    -- TEXT, not JSONB: the app only ever stores/reads this as an opaque JSON string (via
+    -- ObjectMapper) and never queries into it with jsonb operators. JSONB would require Hibernate
+    -- to bind the parameter with an explicit JSON type (@JdbcTypeCode) instead of a plain String
+    -- setter, which Postgres otherwise rejects ("column is of type jsonb but expression is of
+    -- type character varying"). TEXT avoids that mismatch entirely for no loss of behavior here.
+    payload      TEXT          NOT NULL,
     created_at   TIMESTAMPTZ   NOT NULL DEFAULT now(),
     published_at TIMESTAMPTZ               -- NULL = not yet published
 );

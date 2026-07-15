@@ -6,7 +6,7 @@
 CREATE TABLE wallets (
     id          UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
     owner_name  VARCHAR(255)  NOT NULL,
-    currency    CHAR(3)       NOT NULL,           -- ISO 4217 (USD, EUR, VND …)
+    currency    VARCHAR(3)    NOT NULL,           -- ISO 4217 (USD, EUR, VND …)
     balance     NUMERIC(19,4) NOT NULL DEFAULT 0, -- cached, updated atomically with ledger
     created_at  TIMESTAMPTZ   NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ   NOT NULL DEFAULT now(),
@@ -22,7 +22,7 @@ CREATE TABLE transfers (
     source_wallet_id  UUID          NOT NULL REFERENCES wallets(id),
     dest_wallet_id    UUID          NOT NULL REFERENCES wallets(id),
     amount            NUMERIC(19,4) NOT NULL,
-    currency          CHAR(3)       NOT NULL,
+    currency          VARCHAR(3)    NOT NULL,
     status            VARCHAR(10)   NOT NULL DEFAULT 'PENDING',
     created_at        TIMESTAMPTZ   NOT NULL DEFAULT now(),
     completed_at      TIMESTAMPTZ,

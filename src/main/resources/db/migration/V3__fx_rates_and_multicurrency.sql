@@ -2,8 +2,8 @@
 -- The application always fetches the most recent rate for a pair (ORDER BY effective_at DESC LIMIT 1).
 -- To update a rate, INSERT a new row — old rates are preserved for audit.
 CREATE TABLE fx_rates (
-    from_currency CHAR(3)        NOT NULL,
-    to_currency   CHAR(3)        NOT NULL,
+    from_currency VARCHAR(3)     NOT NULL,
+    to_currency   VARCHAR(3)     NOT NULL,
     rate          NUMERIC(19, 8) NOT NULL,
     effective_at  TIMESTAMPTZ    NOT NULL DEFAULT now(),
     PRIMARY KEY (from_currency, to_currency, effective_at),
@@ -31,4 +31,4 @@ ALTER TABLE transfers
 -- Same-currency transfers: currency = transfer.currency for both debit and credit.
 -- Cross-currency: debit entry has source currency, credit entry has dest currency.
 ALTER TABLE ledger_entries
-    ADD COLUMN currency CHAR(3);
+    ADD COLUMN currency VARCHAR(3);

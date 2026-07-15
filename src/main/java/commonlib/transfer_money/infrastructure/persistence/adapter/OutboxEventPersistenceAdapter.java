@@ -1,13 +1,13 @@
 package commonlib.transfer_money.infrastructure.persistence.adapter;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import commonlib.transfer_money.application.port.out.OutboxEventRepository;
 import commonlib.transfer_money.domain.model.OutboxEvent;
 import commonlib.transfer_money.infrastructure.persistence.entity.OutboxEventJpaEntity;
 import commonlib.transfer_money.infrastructure.persistence.repository.OutboxEventJpaRepository;
 import org.springframework.stereotype.Component;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
 import java.util.List;
@@ -42,12 +42,14 @@ public class OutboxEventPersistenceAdapter implements OutboxEventRepository {
         jpaRepository.markPublished(eventId, Instant.now());
     }
 
+    // Jackson 3's JacksonException is unchecked; caught here purely to translate it into a
+    // clearer message rather than let a raw Jackson exception leak out of the persistence layer.
     private OutboxEventJpaEntity toEntity(OutboxEvent e) {
         try {
             String payloadJson = objectMapper.writeValueAsString(e.getPayload());
             return new OutboxEventJpaEntity(e.getId(), e.getEventType(), e.getAggregateId(),
                     payloadJson, e.getCreatedAt(), e.getPublishedAt());
-        } catch (JsonProcessingException ex) {
+        } catch (JacksonException ex) {
             throw new IllegalStateException("Failed to serialize outbox event payload", ex);
         }
     }
@@ -57,7 +59,7 @@ public class OutboxEventPersistenceAdapter implements OutboxEventRepository {
             Map<String, String> payload = objectMapper.readValue(e.getPayload(), MAP_TYPE);
             return new OutboxEvent(e.getId(), e.getEventType(), e.getAggregateId(),
                     payload, e.getCreatedAt(), e.getPublishedAt());
-        } catch (JsonProcessingException ex) {
+        } catch (JacksonException ex) {
             throw new IllegalStateException("Failed to deserialize outbox event payload", ex);
         }
     }

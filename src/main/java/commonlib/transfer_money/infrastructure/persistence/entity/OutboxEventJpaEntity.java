@@ -27,7 +27,10 @@ public class OutboxEventJpaEntity {
     @Column(name = "aggregate_id", nullable = false, columnDefinition = "uuid")
     private UUID aggregateId;
 
-    @Column(nullable = false, columnDefinition = "jsonb")
+    // No explicit columnDefinition: Postgres's JDBC driver reports TEXT under the same type
+    // code as VARCHAR, so Hibernate's default String mapping validates against it without
+    // needing @JdbcTypeCode — unlike CHAR(n)/bpchar, which is a genuinely distinct JDBC type.
+    @Column(nullable = false)
     private String payload;
 
     @Column(name = "created_at", nullable = false, updatable = false)
