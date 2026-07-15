@@ -15,6 +15,9 @@ public record ApiError(
                         "INSUFFICIENT_FUNDS",
                         "IDEMPOTENCY_CONFLICT",
                         "SAME_WALLET_TRANSFER",
+                        "FRAUD_REJECTED",
+                        "FRAUD_CHECK_UNAVAILABLE",
+                        "FX_RATE_NOT_FOUND",
                         "VALIDATION_ERROR",
                         "MISSING_HEADER",
                         "INTERNAL_ERROR"

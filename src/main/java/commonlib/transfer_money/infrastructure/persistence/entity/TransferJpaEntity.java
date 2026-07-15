@@ -37,6 +37,12 @@ public class TransferJpaEntity {
     @Column(nullable = false, length = 3)
     private String currency;
 
+    @Column(name = "dest_amount", precision = 19, scale = 4)
+    private BigDecimal destAmount;
+
+    @Column(name = "exchange_rate", precision = 19, scale = 8)
+    private BigDecimal exchangeRate;
+
     @Column(nullable = false, length = 10)
     private String status;
 

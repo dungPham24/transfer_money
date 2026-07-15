@@ -2,16 +2,17 @@ package commonlib.transfer_money;
 
 import commonlib.transfer_money.api.dto.CreateWalletRequest;
 import commonlib.transfer_money.api.dto.TransferRequest;
-import commonlib.transfer_money.api.dto.TransferResponse;
 import commonlib.transfer_money.api.dto.WalletResponse;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.http.*;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -39,7 +40,7 @@ class ConcurrencyTest {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
     }
 
-    @Autowired TestRestTemplate http;
+    @Autowired WebTestClient http;
     @Autowired JdbcTemplate jdbcTemplate;
 
     /**
@@ -74,12 +75,12 @@ class ConcurrencyTest {
                 ready.countDown();
                 try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
 
-                ResponseEntity<String> resp = doTransferRaw(
+                HttpStatusCode status = doTransferRaw(
                         UUID.randomUUID().toString(), sourceId, destIds.get(idx), amount, "USD");
 
-                if (resp.getStatusCode() == HttpStatus.CREATED) {
+                if (HttpStatus.CREATED.equals(status)) {
                     successes.incrementAndGet();
-                } else if (resp.getStatusCode() == HttpStatus.UNPROCESSABLE_ENTITY) {
+                } else if (HttpStatus.UNPROCESSABLE_ENTITY.equals(status)) {
                     insufficientFunds.incrementAndGet();
                 } else {
                     unexpectedErrors.incrementAndGet();
@@ -134,20 +135,18 @@ class ConcurrencyTest {
             pool.submit(() -> {
                 ready.countDown();
                 try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-                ResponseEntity<String> resp = doTransferRaw(
+                HttpStatusCode status = doTransferRaw(
                         UUID.randomUUID().toString(), walletA, walletB, new BigDecimal("10.00"), "USD");
-                if (resp.getStatusCode() == HttpStatus.CREATED ||
-                        resp.getStatusCode() == HttpStatus.UNPROCESSABLE_ENTITY) {
+                if (HttpStatus.CREATED.equals(status) || HttpStatus.UNPROCESSABLE_ENTITY.equals(status)) {
                     completed.incrementAndGet();
                 }
             });
             pool.submit(() -> {
                 ready.countDown();
                 try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-                ResponseEntity<String> resp = doTransferRaw(
+                HttpStatusCode status = doTransferRaw(
                         UUID.randomUUID().toString(), walletB, walletA, new BigDecimal("10.00"), "USD");
-                if (resp.getStatusCode() == HttpStatus.CREATED ||
-                        resp.getStatusCode() == HttpStatus.UNPROCESSABLE_ENTITY) {
+                if (HttpStatus.CREATED.equals(status) || HttpStatus.UNPROCESSABLE_ENTITY.equals(status)) {
                     completed.incrementAndGet();
                 }
             });
@@ -173,33 +172,39 @@ class ConcurrencyTest {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     private UUID seedWallet(String ownerName, String currency, BigDecimal balance) {
-        ResponseEntity<WalletResponse> resp = http.postForEntity(
-                "/api/v1/wallets",
-                new CreateWalletRequest(ownerName, currency),
-                WalletResponse.class);
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        UUID id = resp.getBody().id();
+        WalletResponse wallet = http.post().uri("/api/v1/wallets")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(new CreateWalletRequest(ownerName, currency))
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(WalletResponse.class)
+                .returnResult().getResponseBody();
+        assertThat(wallet).isNotNull();
         if (balance.compareTo(BigDecimal.ZERO) > 0) {
             jdbcTemplate.update("UPDATE wallets SET balance = ? WHERE id = ?::uuid",
-                    balance, id.toString());
+                    balance, wallet.id().toString());
         }
-        return id;
+        return wallet.id();
     }
 
-    private ResponseEntity<String> doTransferRaw(String idempotencyKey,
-                                                  UUID sourceId, UUID destId,
-                                                  BigDecimal amount, String currency) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Idempotency-Key", idempotencyKey);
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        return http.exchange("/api/v1/transfers", HttpMethod.POST,
-                new HttpEntity<>(new TransferRequest(sourceId, destId, amount, currency), headers),
-                String.class);
+    private HttpStatusCode doTransferRaw(String idempotencyKey,
+                                         UUID sourceId, UUID destId,
+                                         BigDecimal amount, String currency) {
+        return http.post().uri("/api/v1/transfers")
+                .header("Idempotency-Key", idempotencyKey)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(new TransferRequest(sourceId, destId, amount, currency))
+                .exchange()
+                .returnResult(String.class)
+                .getStatus();
     }
 
     private BigDecimal getBalance(UUID walletId) {
-        WalletResponse wallet = http.getForEntity(
-                "/api/v1/wallets/" + walletId, WalletResponse.class).getBody();
+        WalletResponse wallet = http.get().uri("/api/v1/wallets/{id}", walletId)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(WalletResponse.class)
+                .returnResult().getResponseBody();
         assertThat(wallet).isNotNull();
         return wallet.balance();
     }

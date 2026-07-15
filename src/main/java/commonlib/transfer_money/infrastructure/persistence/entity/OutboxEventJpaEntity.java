@@ -9,34 +9,30 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
 
 @Entity
-@Table(name = "ledger_entries")
+@Table(name = "outbox_events")
 @Getter @Setter @NoArgsConstructor @AllArgsConstructor
-public class LedgerEntryJpaEntity {
+public class OutboxEventJpaEntity {
 
     @Id
     @Column(columnDefinition = "uuid")
     private UUID id;
 
-    @Column(name = "transfer_id", nullable = false, columnDefinition = "uuid")
-    private UUID transferId;
+    @Column(name = "event_type", nullable = false, length = 100)
+    private String eventType;
 
-    @Column(name = "wallet_id", nullable = false, columnDefinition = "uuid")
-    private UUID walletId;
+    @Column(name = "aggregate_id", nullable = false, columnDefinition = "uuid")
+    private UUID aggregateId;
 
-    @Column(name = "entry_type", nullable = false, length = 6)
-    private String entryType;
-
-    @Column(nullable = false, precision = 19, scale = 4)
-    private BigDecimal amount;
-
-    @Column(length = 3)
-    private String currency;
+    @Column(nullable = false, columnDefinition = "jsonb")
+    private String payload;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
+
+    @Column(name = "published_at")
+    private Instant publishedAt;
 }

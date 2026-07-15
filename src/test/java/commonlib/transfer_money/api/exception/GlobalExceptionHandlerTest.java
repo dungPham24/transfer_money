@@ -1,3 +1,4 @@
+
 package commonlib.transfer_money.api.exception;
 
 import commonlib.transfer_money.api.TransferController;
@@ -5,6 +6,9 @@ import commonlib.transfer_money.api.WalletController;
 import commonlib.transfer_money.application.port.in.CreateWalletUseCase;
 import commonlib.transfer_money.application.port.in.GetWalletUseCase;
 import commonlib.transfer_money.application.port.in.TransferFundsUseCase;
+import commonlib.transfer_money.domain.exception.FraudCheckRejectedException;
+import commonlib.transfer_money.domain.exception.FraudCheckUnavailableException;
+import commonlib.transfer_money.domain.exception.FxRateNotFoundException;
 import commonlib.transfer_money.domain.exception.IdempotencyConflictException;
 import commonlib.transfer_money.domain.exception.InsufficientFundsException;
 import commonlib.transfer_money.domain.exception.SameWalletTransferException;
@@ -12,7 +16,7 @@ import commonlib.transfer_money.domain.exception.ValidationException;
 import commonlib.transfer_money.domain.exception.WalletNotFoundException;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -109,6 +113,57 @@ class GlobalExceptionHandlerTest {
                 .andExpect(jsonPath("$.code").value("SAME_WALLET_TRANSFER"))
                 .andExpect(jsonPath("$.timestamp").exists())
                 .andExpect(jsonPath("$.details").isArray());
+    }
+
+    // ── FraudCheckRejectedException → 422 ───────────────────────────────────
+
+    @Test
+    void fraudRejected_returns422AndFraudRejectedCode() throws Exception {
+        UUID transferId = UUID.randomUUID();
+        when(transferFundsUseCase.transfer(any(), any(), any(), any(), any()))
+                .thenThrow(new FraudCheckRejectedException(transferId));
+
+        mvc.perform(post("/api/v1/transfers")
+                        .header("Idempotency-Key", "key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(validTransferBody()))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("FRAUD_REJECTED"))
+                .andExpect(jsonPath("$.message").value(containsString(transferId.toString())))
+                .andExpect(jsonPath("$.timestamp").exists());
+    }
+
+    // ── FraudCheckUnavailableException → 503 ────────────────────────────────
+
+    @Test
+    void fraudUnavailable_returns503AndFraudCheckUnavailableCode() throws Exception {
+        when(transferFundsUseCase.transfer(any(), any(), any(), any(), any()))
+                .thenThrow(new FraudCheckUnavailableException("circuit open"));
+
+        mvc.perform(post("/api/v1/transfers")
+                        .header("Idempotency-Key", "key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(validTransferBody()))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("FRAUD_CHECK_UNAVAILABLE"))
+                .andExpect(jsonPath("$.timestamp").exists());
+    }
+
+    // ── FxRateNotFoundException → 422 ────────────────────────────────────────
+
+    @Test
+    void fxRateNotFound_returns422AndFxRateNotFoundCode() throws Exception {
+        when(transferFundsUseCase.transfer(any(), any(), any(), any(), any()))
+                .thenThrow(new FxRateNotFoundException("USD", "VND"));
+
+        mvc.perform(post("/api/v1/transfers")
+                        .header("Idempotency-Key", "key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(validTransferBody()))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("FX_RATE_NOT_FOUND"))
+                .andExpect(jsonPath("$.message").value(containsString("USD")))
+                .andExpect(jsonPath("$.timestamp").exists());
     }
 
     // ── ValidationException (domain) → 400 ──────────────────────────────────

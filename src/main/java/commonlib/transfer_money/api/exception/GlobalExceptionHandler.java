@@ -1,5 +1,8 @@
 package commonlib.transfer_money.api.exception;
 
+import commonlib.transfer_money.domain.exception.FraudCheckRejectedException;
+import commonlib.transfer_money.domain.exception.FraudCheckUnavailableException;
+import commonlib.transfer_money.domain.exception.FxRateNotFoundException;
 import commonlib.transfer_money.domain.exception.IdempotencyConflictException;
 import commonlib.transfer_money.domain.exception.InsufficientFundsException;
 import commonlib.transfer_money.domain.exception.SameWalletTransferException;
@@ -63,6 +66,39 @@ public class GlobalExceptionHandler {
                 .log("transfer.failed");
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(ApiError.of("SAME_WALLET_TRANSFER", ex.getMessage()));
+    }
+
+    // 422: request is well-formed, but the fraud service blocked this specific transfer.
+    @ExceptionHandler(FraudCheckRejectedException.class)
+    ResponseEntity<ApiError> handleFraudRejected(FraudCheckRejectedException ex) {
+        log.atWarn()
+                .addKeyValue("outcome", "FAILED")
+                .addKeyValue("reason", "FRAUD_REJECTED")
+                .log("transfer.failed");
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(ApiError.of("FRAUD_REJECTED", ex.getMessage()));
+    }
+
+    // 503: the fraud service (or its circuit breaker) is unavailable — retry later.
+    @ExceptionHandler(FraudCheckUnavailableException.class)
+    ResponseEntity<ApiError> handleFraudUnavailable(FraudCheckUnavailableException ex) {
+        log.atWarn()
+                .addKeyValue("outcome", "FAILED")
+                .addKeyValue("reason", "FRAUD_CHECK_UNAVAILABLE")
+                .log("transfer.failed");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(ApiError.of("FRAUD_CHECK_UNAVAILABLE", ex.getMessage()));
+    }
+
+    // 422: no FX rate on file for this currency pair — cannot compute destAmount.
+    @ExceptionHandler(FxRateNotFoundException.class)
+    ResponseEntity<ApiError> handleFxRateNotFound(FxRateNotFoundException ex) {
+        log.atWarn()
+                .addKeyValue("outcome", "FAILED")
+                .addKeyValue("reason", "FX_RATE_NOT_FOUND")
+                .log("transfer.failed");
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(ApiError.of("FX_RATE_NOT_FOUND", ex.getMessage()));
     }
 
     // Domain-level business rule violations (e.g. currency mismatch, invalid state transition)

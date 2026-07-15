@@ -28,7 +28,7 @@ public class TransferPersistenceAdapter implements TransferRepository {
 
     @Override
     public Optional<Transfer> findByIdempotencyKey(String idempotencyKey) {
-        return jpaRepository.findByIdempotencyKey(idempotencyKey).map(this::toDomain);
+        return jpaRepository.findByIdempotencyKey(idempotencyKey).map(TransferPersistenceAdapter::toDomain);
     }
 
     /**
@@ -40,15 +40,17 @@ public class TransferPersistenceAdapter implements TransferRepository {
         idempotentInserter.insertPending(toEntity(transfer));
     }
 
-    private TransferJpaEntity toEntity(Transfer t) {
+    static TransferJpaEntity toEntity(Transfer t) {
         return new TransferJpaEntity(t.getId(), t.getIdempotencyKey(), t.getSourceWalletId(),
                 t.getDestWalletId(), t.getAmount(), t.getCurrency(),
+                t.getDestAmount(), t.getExchangeRate(),
                 t.getStatus().name(), t.getCreatedAt(), t.getCompletedAt());
     }
 
-    private Transfer toDomain(TransferJpaEntity e) {
+    static Transfer toDomain(TransferJpaEntity e) {
         return new Transfer(e.getId(), e.getIdempotencyKey(), e.getSourceWalletId(),
                 e.getDestWalletId(), e.getAmount(), e.getCurrency(),
+                e.getDestAmount(), e.getExchangeRate(),
                 TransferStatus.valueOf(e.getStatus()), e.getCreatedAt(), e.getCompletedAt());
     }
 }

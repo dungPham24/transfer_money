@@ -47,7 +47,17 @@ dependencies {
     annotationProcessor 'org.projectlombok:lombok'
 
     // ── Test ──────────────────────────────────────────────────────────────
+    // Resilience4j — programmatic circuit breaker + retry + timeout (no Spring Boot starter needed)
+    implementation 'io.github.resilience4j:resilience4j-circuitbreaker:2.2.0'
+    implementation 'io.github.resilience4j:resilience4j-retry:2.2.0'
+    implementation 'io.github.resilience4j:resilience4j-timelimiter:2.2.0'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'   // JUnit 5 + Mockito
+    // Spring Boot 4 split test slices into per-technology modules — @WebMvcTest now lives here.
+    testImplementation 'org.springframework.boot:spring-boot-webmvc-test'
+    // spring-webflux provides WebTestClient; using it directly (not the starter) avoids
+    // activating reactive-web autoconfiguration which would break @WebMvcTest.
+    testImplementation 'org.springframework:spring-webflux'
 
     // Testcontainers 2.x — artifact IDs renamed; version managed by Spring Boot BOM
     testImplementation 'org.testcontainers:testcontainers-junit-jupiter'

@@ -23,10 +23,10 @@ public record TransferResponse(
         @Schema(description = "Destination (credited) wallet UUID", example = "7c9e6679-7425-40de-944b-e07fc1f90ae7")
         UUID destWalletId,
 
-        @Schema(description = "Transferred amount", example = "100.00")
+        @Schema(description = "Transferred amount in source currency", example = "100.00")
         BigDecimal amount,
 
-        @Schema(description = "ISO 4217 currency code", example = "USD")
+        @Schema(description = "ISO 4217 source currency code", example = "USD")
         String currency,
 
         @Schema(description = "Transfer lifecycle status",
@@ -39,6 +39,14 @@ public record TransferResponse(
 
         @Schema(description = "When the transfer completed (null if still PENDING)",
                 example = "2026-07-14T10:30:00.123Z", nullable = true)
-        Instant completedAt
+        Instant completedAt,
+
+        @Schema(description = "Exchange rate applied for cross-currency transfers (null for same-currency)",
+                example = "0.92", nullable = true)
+        BigDecimal exchangeRate,
+
+        @Schema(description = "Amount credited to destination wallet in its own currency (null for same-currency)",
+                example = "46.00", nullable = true)
+        BigDecimal destAmount
 
 ) {}

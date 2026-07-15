@@ -10,11 +10,13 @@ import commonlib.transfer_money.domain.model.TransferStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.http.*;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -42,9 +44,9 @@ class TransferIntegrationTest {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
     }
 
-    @Autowired TestRestTemplate http;
+    @Autowired WebTestClient http;
     @Autowired JdbcTemplate jdbcTemplate;
-    @Autowired GetWalletUseCase getWalletUseCase; // used for reconcile assertions
+    @Autowired GetWalletUseCase getWalletUseCase;
 
     // ── POST /api/v1/transfers — happy path ─────────────────────────────────
 
@@ -53,17 +55,14 @@ class TransferIntegrationTest {
         UUID sourceId = seedWallet("Alice", "USD", new BigDecimal("200.00"));
         UUID destId   = seedWallet("Bob",   "USD", BigDecimal.ZERO);
 
-        ResponseEntity<TransferResponse> resp = doTransfer(
+        TransferResponse body = doTransfer(
                 UUID.randomUUID().toString(), sourceId, destId, new BigDecimal("75.00"), "USD");
 
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        TransferResponse body = resp.getBody();
         assertThat(body).isNotNull();
         assertThat(body.status()).isEqualTo(TransferStatus.COMPLETED);
         assertThat(body.amount()).isEqualByComparingTo("75.00");
         assertThat(body.completedAt()).isNotNull();
 
-        // Balances updated correctly
         assertThat(getBalance(sourceId)).isEqualByComparingTo("125.00");
         assertThat(getBalance(destId)).isEqualByComparingTo("75.00");
 
@@ -74,31 +73,20 @@ class TransferIntegrationTest {
 
     // ── Idempotency: same key twice moves money exactly once ─────────────────
 
-    /**
-     * Core idempotency test (sequential): same request sent twice must produce
-     * exactly one transfer record, one pair of ledger entries, and one balance change.
-     * The second response must be identical to the first.
-     */
     @Test
     void transfer_sameIdempotencyKeyTwice_movesMoneyOnce() {
         UUID sourceId = seedWallet("Alice", "USD", new BigDecimal("100.00"));
         UUID destId   = seedWallet("Bob",   "USD", BigDecimal.ZERO);
         String idemKey = UUID.randomUUID().toString();
 
-        // ── Send the same request twice (synchronous, sequential) ───────────
-        ResponseEntity<TransferResponse> first  = doTransfer(idemKey, sourceId, destId, new BigDecimal("40.00"), "USD");
-        ResponseEntity<TransferResponse> second = doTransfer(idemKey, sourceId, destId, new BigDecimal("40.00"), "USD");
+        // Send the same request twice — both must return 201 with the same transfer
+        TransferResponse r1 = doTransfer(idemKey, sourceId, destId, new BigDecimal("40.00"), "USD");
+        TransferResponse r2 = doTransfer(idemKey, sourceId, destId, new BigDecimal("40.00"), "USD");
 
-        // ── Same HTTP status ─────────────────────────────────────────────────
-        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-
-        TransferResponse r1 = first.getBody();
-        TransferResponse r2 = second.getBody();
         assertThat(r1).isNotNull();
         assertThat(r2).isNotNull();
 
-        // ── Response of second call is identical to first (same transfer) ────
+        // Second response is identical to first (same transfer object)
         assertThat(r2.id()).isEqualTo(r1.id());
         assertThat(r2.idempotencyKey()).isEqualTo(r1.idempotencyKey());
         assertThat(r2.sourceWalletId()).isEqualTo(r1.sourceWalletId());
@@ -108,13 +96,13 @@ class TransferIntegrationTest {
         assertThat(r2.status()).isEqualTo(r1.status());
         assertThat(r2.completedAt()).isEqualTo(r1.completedAt());
 
-        // ── Exactly 1 transfer record in DB for this idempotency key ────────
+        // Exactly 1 transfer record in DB for this idempotency key
         Integer transferCount = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM transfers WHERE idempotency_key = ?",
                 Integer.class, idemKey);
         assertThat(transferCount).isEqualTo(1);
 
-        // ── Exactly 2 ledger entries (1 DEBIT + 1 CREDIT) for this transfer ─
+        // Exactly 2 ledger entries (1 DEBIT + 1 CREDIT) for this transfer
         Integer ledgerCount = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM ledger_entries WHERE transfer_id = ?::uuid",
                 Integer.class, r1.id().toString());
@@ -130,7 +118,7 @@ class TransferIntegrationTest {
                 Integer.class, r1.id().toString());
         assertThat(creditCount).isEqualTo(1);
 
-        // ── Money moved ONCE: source $60, dest $40 — not $20/$80 ────────────
+        // Money moved ONCE: source $60, dest $40 — not $20/$80
         assertThat(getBalance(sourceId)).isEqualByComparingTo("60.00");
         assertThat(getBalance(destId)).isEqualByComparingTo("40.00");
 
@@ -146,10 +134,8 @@ class TransferIntegrationTest {
 
         doTransfer(idemKey, sourceId, destId, new BigDecimal("50.00"), "USD");
 
-        ResponseEntity<String> conflict =
-                doTransferRaw(idemKey, sourceId, destId, new BigDecimal("99.00"), "USD");
-
-        assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        HttpStatusCode status = doTransferRaw(idemKey, sourceId, destId, new BigDecimal("99.00"), "USD");
+        assertThat(status).isEqualTo(HttpStatus.CONFLICT);
     }
 
     // ── Error cases ─────────────────────────────────────────────────────────
@@ -159,11 +145,11 @@ class TransferIntegrationTest {
         UUID sourceId = seedWallet("Alice", "USD", new BigDecimal("50.00"));
         UUID destId   = seedWallet("Bob",   "USD", BigDecimal.ZERO);
 
-        ResponseEntity<String> resp =
-                doTransferRaw(UUID.randomUUID().toString(), sourceId, destId, new BigDecimal("100.00"), "USD");
+        HttpStatusCode status = doTransferRaw(
+                UUID.randomUUID().toString(), sourceId, destId, new BigDecimal("100.00"), "USD");
 
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
-        assertThat(getBalance(sourceId)).isEqualByComparingTo("50.00"); // unchanged
+        assertThat(status).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        assertThat(getBalance(sourceId)).isEqualByComparingTo("50.00");
         assertThat(getBalance(destId)).isEqualByComparingTo("0.00");
     }
 
@@ -171,23 +157,23 @@ class TransferIntegrationTest {
     void transfer_unknownSourceWallet_returns404() {
         UUID destId = seedWallet("Bob", "USD", BigDecimal.ZERO);
 
-        ResponseEntity<String> resp = doTransferRaw(
+        HttpStatusCode status = doTransferRaw(
                 UUID.randomUUID().toString(),
-                UUID.randomUUID(), // non-existent
+                UUID.randomUUID(),
                 destId,
                 new BigDecimal("10.00"), "USD");
 
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(status).isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     @Test
     void transfer_sameSourceAndDest_returns400() {
         UUID walletId = seedWallet("Alice", "USD", new BigDecimal("100.00"));
 
-        ResponseEntity<String> resp = doTransferRaw(
+        HttpStatusCode status = doTransferRaw(
                 UUID.randomUUID().toString(), walletId, walletId, new BigDecimal("10.00"), "USD");
 
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(status).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     // ── Concurrency: simultaneous transfers cannot overdraw ──────────────────
@@ -215,14 +201,14 @@ class TransferIntegrationTest {
             pool.submit(() -> {
                 ready.countDown();
                 try {
-                    start.await(); // all threads start simultaneously
+                    start.await();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
                 }
-                ResponseEntity<TransferResponse> resp = doTransfer(
+                HttpStatusCode status = doTransferRaw(
                         UUID.randomUUID().toString(), sourceId, destIds.get(idx), transferAmount, "USD");
-                if (resp.getStatusCode() == HttpStatus.CREATED) {
+                if (HttpStatus.CREATED.equals(status)) {
                     successes.incrementAndGet();
                 } else {
                     failures.incrementAndGet();
@@ -230,16 +216,14 @@ class TransferIntegrationTest {
             });
         }
 
-        ready.await();           // wait until all threads are queued
-        start.countDown();       // fire all at once
+        ready.await();
+        start.countDown();
         pool.shutdown();
         pool.awaitTermination(30, TimeUnit.SECONDS);
 
-        // Exactly 5 should succeed (100 / 20 = 5)
         assertThat(successes.get()).isEqualTo(5);
         assertThat(failures.get()).isEqualTo(5);
 
-        // Source balance must be exactly 0 — never negative
         BigDecimal finalBalance = getBalance(sourceId);
         assertThat(finalBalance).isEqualByComparingTo(BigDecimal.ZERO);
     }
@@ -251,44 +235,54 @@ class TransferIntegrationTest {
      * This bypasses the "no deposit endpoint" limitation in tests.
      */
     private UUID seedWallet(String ownerName, String currency, BigDecimal balance) {
-        ResponseEntity<WalletResponse> resp = http.postForEntity(
-                "/api/v1/wallets",
-                new CreateWalletRequest(ownerName, currency),
-                WalletResponse.class);
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        UUID id = resp.getBody().id();
+        WalletResponse wallet = http.post().uri("/api/v1/wallets")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(new CreateWalletRequest(ownerName, currency))
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(WalletResponse.class)
+                .returnResult().getResponseBody();
+        assertThat(wallet).isNotNull();
         if (balance.compareTo(BigDecimal.ZERO) > 0) {
             jdbcTemplate.update("UPDATE wallets SET balance = ? WHERE id = ?::uuid",
-                    balance, id.toString());
+                    balance, wallet.id().toString());
         }
-        return id;
+        return wallet.id();
     }
 
-    private ResponseEntity<TransferResponse> doTransfer(String idempotencyKey,
-                                                         UUID sourceId, UUID destId,
-                                                         BigDecimal amount, String currency) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Idempotency-Key", idempotencyKey);
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        var body = new TransferRequest(sourceId, destId, amount, currency);
-        return http.exchange("/api/v1/transfers", HttpMethod.POST,
-                new HttpEntity<>(body, headers), TransferResponse.class);
+    /** Sends a transfer and asserts 201 — use for success-path tests. */
+    private TransferResponse doTransfer(String idempotencyKey,
+                                        UUID sourceId, UUID destId,
+                                        BigDecimal amount, String currency) {
+        return http.post().uri("/api/v1/transfers")
+                .header("Idempotency-Key", idempotencyKey)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(new TransferRequest(sourceId, destId, amount, currency))
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(TransferResponse.class)
+                .returnResult().getResponseBody();
     }
 
-    private ResponseEntity<String> doTransferRaw(String idempotencyKey,
-                                                  UUID sourceId, UUID destId,
-                                                  BigDecimal amount, String currency) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Idempotency-Key", idempotencyKey);
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        var body = new TransferRequest(sourceId, destId, amount, currency);
-        return http.exchange("/api/v1/transfers", HttpMethod.POST,
-                new HttpEntity<>(body, headers), String.class);
+    /** Sends a transfer and returns the HTTP status without asserting — use for error-path tests. */
+    private HttpStatusCode doTransferRaw(String idempotencyKey,
+                                         UUID sourceId, UUID destId,
+                                         BigDecimal amount, String currency) {
+        return http.post().uri("/api/v1/transfers")
+                .header("Idempotency-Key", idempotencyKey)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(new TransferRequest(sourceId, destId, amount, currency))
+                .exchange()
+                .returnResult(String.class)
+                .getStatus();
     }
 
     private BigDecimal getBalance(UUID walletId) {
-        WalletResponse wallet = http.getForEntity(
-                "/api/v1/wallets/" + walletId, WalletResponse.class).getBody();
+        WalletResponse wallet = http.get().uri("/api/v1/wallets/{id}", walletId)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(WalletResponse.class)
+                .returnResult().getResponseBody();
         assertThat(wallet).isNotNull();
         return wallet.balance();
     }

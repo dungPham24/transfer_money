@@ -1,13 +1,20 @@
 package commonlib.transfer_money.application.service;
 
+import commonlib.transfer_money.application.port.out.FraudCheckPort;
+import commonlib.transfer_money.application.port.out.FxRateRepository;
 import commonlib.transfer_money.application.port.out.LedgerEntryRepository;
+import commonlib.transfer_money.application.port.out.OutboxEventRepository;
 import commonlib.transfer_money.application.port.out.TransferRepository;
 import commonlib.transfer_money.application.port.out.WalletRepository;
 import commonlib.transfer_money.domain.exception.DuplicateTransferKeyException;
+import commonlib.transfer_money.domain.exception.FraudCheckRejectedException;
+import commonlib.transfer_money.domain.exception.FxRateNotFoundException;
 import commonlib.transfer_money.domain.exception.IdempotencyConflictException;
 import commonlib.transfer_money.domain.exception.InsufficientFundsException;
 import commonlib.transfer_money.domain.exception.SameWalletTransferException;
+import commonlib.transfer_money.domain.exception.ValidationException;
 import commonlib.transfer_money.domain.exception.WalletNotFoundException;
+import commonlib.transfer_money.domain.model.FraudDecision;
 import commonlib.transfer_money.domain.model.LedgerEntry;
 import commonlib.transfer_money.domain.model.Transfer;
 import commonlib.transfer_money.domain.model.TransferStatus;
@@ -43,6 +50,9 @@ class TransferServiceTest {
     @Mock WalletRepository walletRepository;
     @Mock TransferRepository transferRepository;
     @Mock LedgerEntryRepository ledgerEntryRepository;
+    @Mock FraudCheckPort fraudCheckPort;
+    @Mock FxRateRepository fxRateRepository;
+    @Mock OutboxEventRepository outboxEventRepository;
     @InjectMocks TransferService transferService;
 
     private Wallet sourceWallet;
@@ -52,6 +62,9 @@ class TransferServiceTest {
     void setUp() {
         sourceWallet = new Wallet(SOURCE_ID, "Alice", "USD", new BigDecimal("100.00"), Instant.now(), Instant.now());
         destWallet   = new Wallet(DEST_ID,   "Bob",   "USD", BigDecimal.ZERO,          Instant.now(), Instant.now());
+        // Not every test reaches the fraud-check call site (e.g. same-wallet, idempotent-replay
+        // paths short-circuit earlier) — lenient() avoids UnnecessaryStubbingException there.
+        lenient().when(fraudCheckPort.check(any(), any(), any(), any())).thenReturn(FraudDecision.APPROVED);
     }
 
     // ── Happy path ──────────────────────────────────────────────────────────
@@ -94,14 +107,25 @@ class TransferServiceTest {
 
     @Test
     void transfer_insertsPendingThenSavesCompleted() {
-        stubLocksAndSaves();
+        // Transfer is a mutable domain object: the same instance passed to
+        // insertPendingOrThrowDuplicate() is later mutated by transfer.complete(). Snapshot its
+        // status at invocation time (doAnswer) rather than reading a captured reference after
+        // the whole transfer() call returns, which would only ever observe the final COMPLETED state.
+        java.util.concurrent.atomic.AtomicReference<TransferStatus> statusAtInsertTime = new java.util.concurrent.atomic.AtomicReference<>();
+        when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
+        when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet));
+        when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(destWallet));
+        doAnswer(inv -> {
+            statusAtInsertTime.set(((Transfer) inv.getArgument(0)).getStatus());
+            return null;
+        }).when(transferRepository).insertPendingOrThrowDuplicate(any());
+        when(transferRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(walletRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         transferService.transfer("key-1", SOURCE_ID, DEST_ID, new BigDecimal("10.00"), "USD");
 
         // Step 1: insertPendingOrThrowDuplicate called with PENDING status
-        ArgumentCaptor<Transfer> pendingCaptor = ArgumentCaptor.forClass(Transfer.class);
-        verify(transferRepository).insertPendingOrThrowDuplicate(pendingCaptor.capture());
-        assertThat(pendingCaptor.getValue().getStatus()).isEqualTo(TransferStatus.PENDING);
+        assertThat(statusAtInsertTime.get()).isEqualTo(TransferStatus.PENDING);
 
         // Step 2: save() called once, with COMPLETED status
         ArgumentCaptor<Transfer> completedCaptor = ArgumentCaptor.forClass(Transfer.class);
@@ -116,13 +140,16 @@ class TransferServiceTest {
         Transfer alreadyCommitted = Transfer.create("key-race", SOURCE_ID, DEST_ID, new BigDecimal("30.00"), "USD");
         alreadyCommitted.complete();
 
-        when(transferRepository.findByIdempotencyKey("key-race")).thenReturn(Optional.empty()); // passes layer-1 check
+        // 1st call (layer-1 check) sees nothing yet; 2nd call (after the duplicate-key signal)
+        // re-reads the row a concurrent request just committed. A second when(...) on the same
+        // argument would simply overwrite the first — thenReturn(a, b) is required to sequence them.
+        when(transferRepository.findByIdempotencyKey("key-race"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(alreadyCommitted));
         when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet));
         when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(destWallet));
         doThrow(new DuplicateTransferKeyException("key-race"))
                 .when(transferRepository).insertPendingOrThrowDuplicate(any());
-        // After the exception, the service re-reads the committed transfer
-        when(transferRepository.findByIdempotencyKey("key-race")).thenReturn(Optional.of(alreadyCommitted));
 
         Transfer result = transferService.transfer("key-race", SOURCE_ID, DEST_ID, new BigDecimal("30.00"), "USD");
 
@@ -180,7 +207,7 @@ class TransferServiceTest {
         when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet));
         when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(destWallet));
         doNothing().when(transferRepository).insertPendingOrThrowDuplicate(any());
-        when(transferRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        // transferRepository.save() is never reached — debit() throws first — so it's not stubbed here.
 
         // Source has $100, requesting $200
         assertThatThrownBy(() ->
@@ -236,8 +263,10 @@ class TransferServiceTest {
         UUID smallId = UUID.fromString("00000000-0000-0000-0000-000000000001");
         UUID largeId = UUID.fromString("00000000-0000-0000-0000-000000000009");
 
-        Wallet small = new Wallet(smallId, "X", "USD", new BigDecimal("100.00"), Instant.now(), Instant.now());
-        Wallet large = new Wallet(largeId, "Y", "USD", BigDecimal.ZERO, Instant.now(), Instant.now());
+        // "large"/"small" name the wallet IDs (for lock-order clarity), not the balances:
+        // large is the transfer source here, so it needs the funds.
+        Wallet small = new Wallet(smallId, "X", "USD", BigDecimal.ZERO,          Instant.now(), Instant.now());
+        Wallet large = new Wallet(largeId, "Y", "USD", new BigDecimal("100.00"), Instant.now(), Instant.now());
 
         when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
         when(walletRepository.findByIdForUpdate(smallId)).thenReturn(Optional.of(small));
@@ -252,6 +281,100 @@ class TransferServiceTest {
         var inOrder = inOrder(walletRepository);
         inOrder.verify(walletRepository).findByIdForUpdate(smallId); // smaller UUID always first
         inOrder.verify(walletRepository).findByIdForUpdate(largeId);
+    }
+
+    // ── Fraud check ─────────────────────────────────────────────────────────
+
+    @Test
+    void transfer_fraudRejected_throwsAndNeverAcquiresLocks() {
+        when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
+        when(fraudCheckPort.check(any(), any(), any(), any())).thenReturn(FraudDecision.REJECTED);
+
+        assertThatThrownBy(() ->
+                transferService.transfer("key-1", SOURCE_ID, DEST_ID, new BigDecimal("10.00"), "USD"))
+                .isInstanceOf(FraudCheckRejectedException.class);
+
+        // Rejected before any lock/write — no wallet or ledger interaction at all
+        verifyNoInteractions(walletRepository, ledgerEntryRepository, outboxEventRepository);
+        verify(transferRepository, never()).insertPendingOrThrowDuplicate(any());
+    }
+
+    @Test
+    void transfer_fraudCheckRunsBeforeWalletLocks() {
+        stubLocksAndSaves();
+
+        transferService.transfer("key-1", SOURCE_ID, DEST_ID, new BigDecimal("10.00"), "USD");
+
+        var inOrder = inOrder(fraudCheckPort, walletRepository);
+        inOrder.verify(fraudCheckPort).check(any(), eq(SOURCE_ID), any(), any());
+        inOrder.verify(walletRepository).findByIdForUpdate(SOURCE_ID);
+    }
+
+    // ── Cross-currency (FX) ─────────────────────────────────────────────────
+
+    @Test
+    void transfer_crossCurrency_convertsDestAmountUsingFxRate() {
+        Wallet eurDest = new Wallet(DEST_ID, "Bob", "EUR", BigDecimal.ZERO, Instant.now(), Instant.now());
+
+        when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
+        when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet));
+        when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(eurDest));
+        when(fxRateRepository.findLatestRate("USD", "EUR")).thenReturn(Optional.of(new BigDecimal("0.92")));
+        doNothing().when(transferRepository).insertPendingOrThrowDuplicate(any());
+        when(transferRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(walletRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        Transfer result = transferService.transfer("key-1", SOURCE_ID, DEST_ID, new BigDecimal("10.00"), "USD");
+
+        assertThat(result.getExchangeRate()).isEqualByComparingTo("0.92");
+        assertThat(result.getDestAmount()).isEqualByComparingTo("9.2000");
+        assertThat(sourceWallet.getBalance()).isEqualByComparingTo("90.00"); // debited in USD
+        assertThat(eurDest.getBalance()).isEqualByComparingTo("9.2000");     // credited in EUR
+    }
+
+    @Test
+    void transfer_crossCurrency_noFxRate_throwsFxRateNotFoundException() {
+        Wallet eurDest = new Wallet(DEST_ID, "Bob", "EUR", BigDecimal.ZERO, Instant.now(), Instant.now());
+
+        when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
+        when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet));
+        when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(eurDest));
+        when(fxRateRepository.findLatestRate("USD", "EUR")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() ->
+                transferService.transfer("key-1", SOURCE_ID, DEST_ID, new BigDecimal("10.00"), "USD"))
+                .isInstanceOf(FxRateNotFoundException.class);
+
+        verifyNoInteractions(ledgerEntryRepository);
+        verify(transferRepository, never()).insertPendingOrThrowDuplicate(any());
+    }
+
+    @Test
+    void transfer_currencyDoesNotMatchSourceWallet_throwsValidationException() {
+        when(transferRepository.findByIdempotencyKey(any())).thenReturn(Optional.empty());
+        when(walletRepository.findByIdForUpdate(SOURCE_ID)).thenReturn(Optional.of(sourceWallet)); // USD wallet
+        when(walletRepository.findByIdForUpdate(DEST_ID)).thenReturn(Optional.of(destWallet));
+
+        assertThatThrownBy(() ->
+                transferService.transfer("key-1", SOURCE_ID, DEST_ID, new BigDecimal("10.00"), "EUR"))
+                .isInstanceOf(ValidationException.class);
+
+        verifyNoInteractions(ledgerEntryRepository);
+    }
+
+    // ── Outbox ──────────────────────────────────────────────────────────────
+
+    @Test
+    void transfer_onSuccess_writesTransferCompletedOutboxEvent() {
+        stubLocksAndSaves();
+
+        Transfer result = transferService.transfer("key-1", SOURCE_ID, DEST_ID, new BigDecimal("10.00"), "USD");
+
+        ArgumentCaptor<commonlib.transfer_money.domain.model.OutboxEvent> captor =
+                ArgumentCaptor.forClass(commonlib.transfer_money.domain.model.OutboxEvent.class);
+        verify(outboxEventRepository).save(captor.capture());
+        assertThat(captor.getValue().getEventType()).isEqualTo("TRANSFER_COMPLETED");
+        assertThat(captor.getValue().getAggregateId()).isEqualTo(result.getId());
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────

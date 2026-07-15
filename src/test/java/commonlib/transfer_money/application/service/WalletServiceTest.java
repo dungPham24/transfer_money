@@ -102,7 +102,7 @@ class WalletServiceTest {
         UUID transferId = UUID.randomUUID();
         Wallet wallet = new Wallet(walletId, "Alice", "USD", BigDecimal.ZERO, Instant.now(), Instant.now());
 
-        LedgerEntry entry = LedgerEntry.credit(transferId, walletId, new BigDecimal("50.00"));
+        LedgerEntry entry = LedgerEntry.credit(transferId, walletId, new BigDecimal("50.00"), "USD");
         PageResult<LedgerEntry> expected = new PageResult<>(List.of(entry), 1L, 1, 0, 20);
 
         when(walletRepository.findById(walletId)).thenReturn(Optional.of(wallet));

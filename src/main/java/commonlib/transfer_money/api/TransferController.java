@@ -79,6 +79,7 @@ public class TransferController {
     private TransferResponse toResponse(Transfer t) {
         return new TransferResponse(t.getId(), t.getIdempotencyKey(), t.getSourceWalletId(),
                 t.getDestWalletId(), t.getAmount(), t.getCurrency(),
-                t.getStatus(), t.getCreatedAt(), t.getCompletedAt());
+                t.getStatus(), t.getCreatedAt(), t.getCompletedAt(),
+                t.getExchangeRate(), t.getDestAmount());
     }
 }
