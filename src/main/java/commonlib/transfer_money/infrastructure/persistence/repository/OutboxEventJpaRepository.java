@@ -12,7 +12,11 @@ import java.util.UUID;
 
 public interface OutboxEventJpaRepository extends JpaRepository<OutboxEventJpaEntity, UUID> {
 
-    @Query("SELECT e FROM OutboxEventJpaEntity e WHERE e.publishedAt IS NULL ORDER BY e.createdAt ASC LIMIT :limit")
+    // Native + FOR UPDATE SKIP LOCKED: when multiple app instances run OutboxPoller concurrently,
+    // each poll grabs a disjoint batch instead of all instances racing to publish the same rows.
+    // JPQL has no SKIP LOCKED support, hence native SQL here (column names match the entity 1:1).
+    @Query(value = "SELECT * FROM outbox_events WHERE published_at IS NULL " +
+            "ORDER BY created_at ASC LIMIT :limit FOR UPDATE SKIP LOCKED", nativeQuery = true)
     List<OutboxEventJpaEntity> findUnpublished(@Param("limit") int limit);
 
     @Modifying

@@ -9,6 +9,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryConfig;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -16,6 +17,8 @@ import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
@@ -38,8 +41,18 @@ public class ResilientFraudCheckAdapter implements FraudCheckPort {
     private CircuitBreaker circuitBreaker;
     private Retry retry;
 
+    // Dedicated pool, not ForkJoinPool.commonPool(): the common pool is shared JVM-wide with
+    // everything else running in this process (including, in tests, unrelated test classes) —
+    // a blocking bulkhead here keeps fraud-check latency/starvation isolated to this adapter.
+    private final ExecutorService fraudCheckExecutor = Executors.newFixedThreadPool(20);
+
     public ResilientFraudCheckAdapter(StubFraudCheckAdapter stub) {
         this.stub = stub;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        fraudCheckExecutor.shutdown();
     }
 
     @PostConstruct
@@ -77,7 +90,7 @@ public class ResilientFraudCheckAdapter implements FraudCheckPort {
                                            BigDecimal amount, String currency) {
         try {
             return CompletableFuture.supplyAsync(
-                            () -> stub.check(transferId, sourceWalletId, amount, currency))
+                            () -> stub.check(transferId, sourceWalletId, amount, currency), fraudCheckExecutor)
                     .orTimeout(2, TimeUnit.SECONDS)
                     .get();
         } catch (InterruptedException e) {
