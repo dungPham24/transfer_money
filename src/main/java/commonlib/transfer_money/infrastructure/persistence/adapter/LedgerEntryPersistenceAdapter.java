@@ -46,12 +46,12 @@ public class LedgerEntryPersistenceAdapter implements LedgerEntryRepository {
     }
 
     private LedgerEntryJpaEntity toEntity(LedgerEntry e) {
-        return new LedgerEntryJpaEntity(e.getId(), e.getTransferId(), e.getWalletId(),
+        return new LedgerEntryJpaEntity(e.getId(), e.getTransferId(), e.getDepositId(), e.getWalletId(),
                 e.getEntryType().name(), e.getAmount(), e.getCurrency(), e.getCreatedAt());
     }
 
     private LedgerEntry toDomain(LedgerEntryJpaEntity e) {
-        return new LedgerEntry(e.getId(), e.getTransferId(), e.getWalletId(),
+        return new LedgerEntry(e.getId(), e.getTransferId(), e.getDepositId(), e.getWalletId(),
                 LedgerEntry.EntryType.valueOf(e.getEntryType()), e.getAmount(),
                 e.getCurrency(), e.getCreatedAt());
     }

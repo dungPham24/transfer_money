@@ -4,6 +4,7 @@ package commonlib.transfer_money.api.exception;
 import commonlib.transfer_money.api.TransferController;
 import commonlib.transfer_money.api.WalletController;
 import commonlib.transfer_money.application.port.in.CreateWalletUseCase;
+import commonlib.transfer_money.application.port.in.DepositFundsUseCase;
 import commonlib.transfer_money.application.port.in.GetWalletUseCase;
 import commonlib.transfer_money.application.port.in.TransferFundsUseCase;
 import commonlib.transfer_money.domain.exception.FraudCheckRejectedException;
@@ -42,6 +43,7 @@ class GlobalExceptionHandlerTest {
 
     @MockitoBean CreateWalletUseCase createWalletUseCase;
     @MockitoBean GetWalletUseCase    getWalletUseCase;
+    @MockitoBean DepositFundsUseCase depositFundsUseCase;
     @MockitoBean TransferFundsUseCase transferFundsUseCase;
 
     // ── WalletNotFoundException → 404 ───────────────────────────────────────

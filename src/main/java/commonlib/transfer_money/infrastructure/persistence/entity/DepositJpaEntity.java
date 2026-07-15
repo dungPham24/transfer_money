@@ -14,30 +14,21 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Entity
-@Table(name = "ledger_entries")
+@Table(name = "deposits")
 @Getter @Setter @NoArgsConstructor @AllArgsConstructor
-public class LedgerEntryJpaEntity {
+public class DepositJpaEntity {
 
     @Id
     @Column(columnDefinition = "uuid")
     private UUID id;
 
-    @Column(name = "transfer_id", columnDefinition = "uuid")
-    private UUID transferId;
-
-    @Column(name = "deposit_id", columnDefinition = "uuid")
-    private UUID depositId;
-
     @Column(name = "wallet_id", nullable = false, columnDefinition = "uuid")
     private UUID walletId;
-
-    @Column(name = "entry_type", nullable = false, length = 6)
-    private String entryType;
 
     @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal amount;
 
-    @Column(length = 3)
+    @Column(nullable = false, length = 3)
     private String currency;
 
     @Column(name = "created_at", nullable = false, updatable = false)

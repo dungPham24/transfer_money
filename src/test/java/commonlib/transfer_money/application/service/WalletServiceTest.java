@@ -1,9 +1,12 @@
 package commonlib.transfer_money.application.service;
 
 import commonlib.transfer_money.application.PageResult;
+import commonlib.transfer_money.application.port.out.DepositRepository;
 import commonlib.transfer_money.application.port.out.LedgerEntryRepository;
 import commonlib.transfer_money.application.port.out.WalletRepository;
+import commonlib.transfer_money.domain.exception.ValidationException;
 import commonlib.transfer_money.domain.exception.WalletNotFoundException;
+import commonlib.transfer_money.domain.model.Deposit;
 import commonlib.transfer_money.domain.model.LedgerEntry;
 import commonlib.transfer_money.domain.model.Wallet;
 import org.junit.jupiter.api.Test;
@@ -29,6 +32,7 @@ class WalletServiceTest {
 
     @Mock WalletRepository walletRepository;
     @Mock LedgerEntryRepository ledgerEntryRepository;
+    @Mock DepositRepository depositRepository;
     @InjectMocks WalletService walletService;
 
     // ── createWallet ────────────────────────────────────────────────────────
@@ -81,6 +85,54 @@ class WalletServiceTest {
         assertThatThrownBy(() -> walletService.getWallet(id))
                 .isInstanceOf(WalletNotFoundException.class)
                 .hasMessageContaining(id.toString());
+    }
+
+    // ── deposit ─────────────────────────────────────────────────────────────
+
+    @Test
+    void deposit_creditsWalletAndWritesLedgerEntry() {
+        UUID walletId = UUID.randomUUID();
+        Wallet wallet = new Wallet(walletId, "Alice", "USD", new BigDecimal("100.00"), Instant.now(), Instant.now());
+        when(walletRepository.findByIdForUpdate(walletId)).thenReturn(Optional.of(wallet));
+        when(depositRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(walletRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        Wallet result = walletService.deposit(walletId, new BigDecimal("50.00"), "USD");
+
+        assertThat(result.getBalance()).isEqualByComparingTo("150.00");
+
+        ArgumentCaptor<List<LedgerEntry>> captor = ArgumentCaptor.forClass(List.class);
+        verify(ledgerEntryRepository).saveAll(captor.capture());
+        List<LedgerEntry> entries = captor.getValue();
+        assertThat(entries).hasSize(1);
+        assertThat(entries.get(0).getEntryType()).isEqualTo(LedgerEntry.EntryType.CREDIT);
+        assertThat(entries.get(0).getTransferId()).isNull();
+        assertThat(entries.get(0).getDepositId()).isNotNull();
+        assertThat(entries.get(0).getWalletId()).isEqualTo(walletId);
+    }
+
+    @Test
+    void deposit_unknownWallet_throwsWalletNotFoundException() {
+        UUID walletId = UUID.randomUUID();
+        when(walletRepository.findByIdForUpdate(walletId)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> walletService.deposit(walletId, new BigDecimal("50.00"), "USD"))
+                .isInstanceOf(WalletNotFoundException.class);
+
+        verifyNoInteractions(depositRepository, ledgerEntryRepository);
+    }
+
+    @Test
+    void deposit_currencyMismatch_throwsValidationException() {
+        UUID walletId = UUID.randomUUID();
+        Wallet wallet = new Wallet(walletId, "Alice", "USD", BigDecimal.ZERO, Instant.now(), Instant.now());
+        when(walletRepository.findByIdForUpdate(walletId)).thenReturn(Optional.of(wallet));
+
+        assertThatThrownBy(() -> walletService.deposit(walletId, new BigDecimal("50.00"), "EUR"))
+                .isInstanceOf(ValidationException.class);
+
+        verifyNoInteractions(depositRepository, ledgerEntryRepository);
+        verify(walletRepository, never()).save(any());
     }
 
     // ── getTransactionHistory ───────────────────────────────────────────────

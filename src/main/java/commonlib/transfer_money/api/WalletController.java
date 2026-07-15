@@ -1,12 +1,14 @@
 package commonlib.transfer_money.api;
 
 import commonlib.transfer_money.api.dto.CreateWalletRequest;
+import commonlib.transfer_money.api.dto.DepositRequest;
 import commonlib.transfer_money.api.dto.PagedResponse;
 import commonlib.transfer_money.api.dto.TransactionHistoryResponse;
 import commonlib.transfer_money.api.dto.WalletResponse;
 import commonlib.transfer_money.api.exception.ApiError;
 import commonlib.transfer_money.application.PageResult;
 import commonlib.transfer_money.application.port.in.CreateWalletUseCase;
+import commonlib.transfer_money.application.port.in.DepositFundsUseCase;
 import commonlib.transfer_money.application.port.in.GetWalletUseCase;
 import commonlib.transfer_money.domain.model.LedgerEntry;
 import commonlib.transfer_money.domain.model.Wallet;
@@ -34,11 +36,14 @@ public class WalletController {
 
     private final CreateWalletUseCase createWalletUseCase;
     private final GetWalletUseCase    getWalletUseCase;
+    private final DepositFundsUseCase depositFundsUseCase;
 
     public WalletController(CreateWalletUseCase createWalletUseCase,
-                             GetWalletUseCase getWalletUseCase) {
+                             GetWalletUseCase getWalletUseCase,
+                             DepositFundsUseCase depositFundsUseCase) {
         this.createWalletUseCase = createWalletUseCase;
         this.getWalletUseCase    = getWalletUseCase;
+        this.depositFundsUseCase = depositFundsUseCase;
     }
 
     @PostMapping
@@ -64,6 +69,25 @@ public class WalletController {
     })
     public WalletResponse get(@PathVariable UUID id) {
         return toResponse(getWalletUseCase.getWallet(id));
+    }
+
+    @PostMapping("/{id}/deposits")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Operation(summary = "Deposit funds into a wallet",
+               description = "Credits the wallet from outside the ledger (e.g. bank transfer, card top-up) "
+                       + "and writes a single balanced ledger CREDIT entry. `currency` must match the "
+                       + "wallet's own currency. Demo/seeding utility — not idempotency-key protected "
+                       + "(unlike POST /transfers); a production deposit flow triggered by an external "
+                       + "payment provider would need the same retry-safety treatment as transfers.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "201", description = "Deposit completed successfully"),
+            @ApiResponse(responseCode = "400", description = "Validation failed, or currency does not match the wallet's currency",
+                         content = @Content(schema = @Schema(implementation = ApiError.class))),
+            @ApiResponse(responseCode = "404", description = "No wallet exists with the given ID",
+                         content = @Content(schema = @Schema(implementation = ApiError.class)))
+    })
+    public WalletResponse deposit(@PathVariable UUID id, @Valid @RequestBody DepositRequest request) {
+        return toResponse(depositFundsUseCase.deposit(id, request.amount(), request.currency()));
     }
 
     @GetMapping("/{id}/transactions")
