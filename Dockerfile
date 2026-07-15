@@ -1,5 +1,7 @@
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM eclipse-temurin:17-jdk-alpine AS build
+# Debian-based (not -alpine): the alpine tag for this image is amd64-only — it has no arm64
+# manifest, so `docker compose up` fails outright on Apple Silicon. This tag is multi-arch.
+FROM eclipse-temurin:17-jdk AS build
 WORKDIR /app
 
 # Copy dependency descriptors first so this expensive layer is cached
@@ -12,11 +14,11 @@ COPY src/ src/
 RUN ./gradlew bootJar -x test --no-daemon --quiet
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-FROM eclipse-temurin:17-jre-alpine
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 
 # Run as non-root
-RUN addgroup -S app && adduser -S app -G app
+RUN groupadd --system app && useradd --system --gid app app
 USER app
 
 COPY --from=build /app/build/libs/*.jar app.jar

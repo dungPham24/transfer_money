@@ -31,8 +31,10 @@ dependencies {
     // Database driver
     runtimeOnly 'org.postgresql:postgresql'
 
-    // Flyway — core + PostgreSQL dialect module (required from Flyway 10+)
-    implementation 'org.flywaydb:flyway-core'
+    // Flyway — Spring Boot 4 split FlywayAutoConfiguration into its own module
+    // (spring-boot-flyway); flyway-core alone no longer triggers migration-on-startup.
+    // flyway-database-postgresql is still required separately (Flyway 10+ split DB dialects out).
+    implementation 'org.springframework.boot:spring-boot-starter-flyway'
     implementation 'org.flywaydb:flyway-database-postgresql'
 
     // OpenAPI / Swagger UI
@@ -55,9 +57,16 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'   // JUnit 5 + Mockito
     // Spring Boot 4 split test slices into per-technology modules — @WebMvcTest now lives here.
     testImplementation 'org.springframework.boot:spring-boot-webmvc-test'
-    // spring-webflux provides WebTestClient; using it directly (not the starter) avoids
-    // activating reactive-web autoconfiguration which would break @WebMvcTest.
+    // spring-webflux provides the WebTestClient class; using it directly (not the full webflux
+    // starter, and not @AutoConfigureWebTestClient) avoids activating reactive-web
+    // autoconfiguration which would break @WebMvcTest. WebTestClient is instead built manually
+    // in each @SpringBootTest, bound to @LocalServerPort — see WalletIntegrationTest etc.
     testImplementation 'org.springframework:spring-webflux'
+    // Without reactor-netty on the classpath, WebTestClient falls back to a JDK HttpClient-based
+    // connector whose default concurrency is too limited for the 10-20 simultaneous blocking
+    // .exchange() calls the concurrency tests fire — explicit reactor-netty + a sized connection
+    // pool (see ConcurrencyTest/TransferIntegrationTest setUpHttpClient) fixes that.
+    testImplementation 'io.projectreactor.netty:reactor-netty-http'
 
     // Testcontainers 2.x — artifact IDs renamed; version managed by Spring Boot BOM
     testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
