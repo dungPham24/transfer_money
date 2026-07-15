@@ -15,9 +15,18 @@ Prerequisites: Docker and Docker Compose installed. Nothing else required — th
 git clone https://github.com/dungPham24/transfer_money.git
 cd transfer_money
 
-# 2. (Optional) Override credentials — defaults work fine for local testing
+# 2. (Optional) Override credentials/ports — defaults work fine for local testing
 cp .env.example .env
+```
 
+Postgres is exposed on **host port 5433**, not 5432 — the single most common port to already be
+taken by a locally-installed Postgres, which would otherwise make `docker compose up` fail with a
+"port already in use" error before the app ever gets a chance to start. This only affects
+optional external access (e.g. connecting with `psql`/DBeaver from your host); the app itself
+always talks to `db:5432` over the internal Docker network regardless. Override via `.env` if
+you need a different port.
+
+```bash
 # 3. Start everything
 docker compose up --build
 ```
@@ -27,21 +36,36 @@ First run takes 2–3 minutes: downloads the JDK image, resolves Gradle dependen
 When you see `Started TransferMoneyApplication in X seconds`, the API is ready.
 
 ```bash
-# Create a wallet
-curl -X POST http://localhost:8080/api/v1/wallets \
+# Create two wallets
+ALICE=$(curl -s -X POST http://localhost:8080/api/v1/wallets \
   -H "Content-Type: application/json" \
-  -d '{"ownerName": "Alice", "currency": "USD"}'
+  -d '{"ownerName": "Alice", "currency": "USD"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 
-# Transfer funds (replace UUIDs with real ones from above)
+BOB=$(curl -s -X POST http://localhost:8080/api/v1/wallets \
+  -H "Content-Type: application/json" \
+  -d '{"ownerName": "Bob", "currency": "USD"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+
+# Fund Alice — wallets start at $0; deposits are real ledger-writing transactions
+# (POST /wallets/{id}/deposits), not a raw balance UPDATE, so the ledger stays the
+# single source of truth even for how a wallet first got its money.
+curl -X POST "http://localhost:8080/api/v1/wallets/$ALICE/deposits" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 200.00, "currency": "USD"}'
+
+# Transfer funds Alice -> Bob
 curl -X POST http://localhost:8080/api/v1/transfers \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d '{
-    "sourceWalletId": "<alice-wallet-id>",
-    "destWalletId":   "<bob-wallet-id>",
-    "amount": 50.00,
-    "currency": "USD"
-  }'
+  -d "{
+    \"sourceWalletId\": \"$ALICE\",
+    \"destWalletId\":   \"$BOB\",
+    \"amount\": 50.00,
+    \"currency\": \"USD\"
+  }"
+
+# Check balances
+curl "http://localhost:8080/api/v1/wallets/$ALICE"   # → 150.00
+curl "http://localhost:8080/api/v1/wallets/$BOB"     # → 50.00
 
 # Interactive API docs
 open http://localhost:8080/swagger-ui.html
@@ -52,6 +76,63 @@ docker compose logs -f app | jq .
 # Shut down and wipe the database
 docker compose down -v
 ```
+
+---
+
+## Testing
+
+Two tiers, and they run very differently — know which one you're running.
+
+### Unit tests — no Docker, no database, run in milliseconds
+
+`TransferServiceTest` and `WalletServiceTest` are plain Mockito tests against the service layer
+(no Spring context at all). `GlobalExceptionHandlerTest` is a `@WebMvcTest` slice — it boots only
+the web layer (controllers + `GlobalExceptionHandler`), no database.
+
+```bash
+./gradlew test --tests "commonlib.transfer_money.application.service.*" \
+                --tests "commonlib.transfer_money.api.exception.*"
+```
+
+### Integration tests — need Docker (Testcontainers boots a real, throwaway Postgres)
+
+`WalletIntegrationTest`, `TransferIntegrationTest`, and `ConcurrencyTest` each spin up a real
+Postgres container, run the actual Flyway migrations against it, and drive the app end-to-end
+over real HTTP. These are slower (each test class pays container-startup cost) but they're what
+actually proves correctness — everything from `ddl-auto=validate` schema checks to real
+row-level locking behaves differently against a real database than any mock ever could.
+
+```bash
+./gradlew test
+```
+
+These two tests specifically prove the assessment's two hardest requirements:
+
+- **Idempotency** — `TransferIntegrationTest.transfer_sameIdempotencyKeyTwice_movesMoneyOnce()`
+  sends the *same* transfer request twice with the *same* `Idempotency-Key` header and asserts
+  money moved exactly once: exactly one row in `transfers`, exactly two rows in `ledger_entries`
+  (one DEBIT, one CREDIT), both HTTP responses identical, and the second call does no wallet or
+  ledger writes at all.
+
+- **Concurrency / no overdraw** — `ConcurrencyTest.simultaneousWithdrawals_neverOverdraw_exactlyMaxSucceed()`
+  fires 20 real concurrent HTTP requests (separate threads, separate connections) transferring
+  $10 each out of a single $100 wallet, and asserts exactly 10 succeed, exactly 10 fail with 422,
+  and the final balance is exactly $0 — never negative, no matter how the requests interleave.
+  `ConcurrencyTest.oppositeDirectionTransfers_completeWithoutDeadlock()` fires transfers in both
+  directions between two wallets simultaneously (A→B and B→A at once) and asserts neither
+  deadlocks, proving the fixed-lock-order strategy in `TransferService`.
+
+Run just those two:
+
+```bash
+./gradlew test --tests "commonlib.transfer_money.ConcurrencyTest" \
+                --tests "commonlib.transfer_money.TransferIntegrationTest"
+```
+
+If you already have a local Postgres running (e.g. on 5432), that's unrelated and won't interfere
+— Testcontainers always picks its own random free host port per container, independent of
+`application.properties`' hardcoded `spring.datasource.url` (which the tests override via
+`@DynamicPropertySource`).
 
 ---
 
