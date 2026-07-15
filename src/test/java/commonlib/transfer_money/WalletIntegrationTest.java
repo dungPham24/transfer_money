@@ -4,19 +4,24 @@ import commonlib.transfer_money.api.dto.CreateWalletRequest;
 import commonlib.transfer_money.api.dto.PagedResponse;
 import commonlib.transfer_money.api.dto.TransactionHistoryResponse;
 import commonlib.transfer_money.api.dto.WalletResponse;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import reactor.netty.http.client.HttpClient;
+import reactor.netty.resources.ConnectionProvider;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -35,7 +40,27 @@ class WalletIntegrationTest {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
     }
 
-    @Autowired WebTestClient http;
+    // maxConnections sized well above any test's thread count — without this, WebTestClient's
+    // default reactor-netty connection pool serializes concurrent .exchange() calls from
+    // separate Java threads, which looks identical to a server-side hang/deadlock in a test.
+    private static final ConnectionProvider CONNECTION_PROVIDER =
+            ConnectionProvider.builder("test-pool").maxConnections(50).build();
+
+    @LocalServerPort int port;
+    WebTestClient http;
+
+    // Built manually (not @Autowired) — this Servlet-based app has no reactive-web
+    // autoconfiguration that would register a WebTestClient bean bound to the random port.
+    @BeforeEach
+    void setUpHttpClient() {
+        http = WebTestClient
+                .bindToServer(new ReactorClientHttpConnector(HttpClient.create(CONNECTION_PROVIDER)))
+                .baseUrl("http://localhost:" + port)
+                // Default WebTestClient response timeout is 5s — too tight for a freshly
+                // started Testcontainers Postgres + cold JVM/connection-pool warmup.
+                .responseTimeout(Duration.ofSeconds(30))
+                .build();
+    }
 
     // ── POST /api/v1/wallets ────────────────────────────────────────────────
 

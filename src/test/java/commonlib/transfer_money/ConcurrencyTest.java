@@ -6,18 +6,20 @@ import commonlib.transfer_money.api.dto.WalletResponse;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.HttpStatusCode;
-import org.springframework.http.MediaType;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -26,6 +28,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+// Plain java.net.http.HttpClient, not WebTestClient/TestRestTemplate: WebTestClient's
+// reactor-netty client sharing a JVM with this Servlet-based app's embedded Tomcat reliably hung
+// every concurrent request for the full response timeout in these multi-threaded tests
+// (confirmed via diagnostic stack traces — every thread blocked in Mono.block() with zero
+// requests ever completing), despite the exact same requests completing in well under a second
+// against a real running instance via curl. TestRestTemplate would be the traditional fix but
+// was removed in Spring Boot 4 (no longer resolvable anywhere in the dependency tree). The JDK's
+// own HttpClient has no such entanglement and no dependency on Spring's test-client churn.
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers
 class ConcurrencyTest {
@@ -38,10 +48,19 @@ class ConcurrencyTest {
         registry.add("spring.datasource.url",      POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
+        // application.properties' hikari.maximum-pool-size wasn't taking effect here (root cause
+        // not yet fully understood — possibly src/test/resources/application.properties shadowing
+        // src/main's on the classpath) — set explicitly so this test's 20-way contention on one
+        // wallet doesn't exhaust a 10-connection default pool (each blocked SELECT FOR UPDATE
+        // holds its connection for the whole wait, not just its own query).
+        registry.add("spring.datasource.hikari.maximum-pool-size", () -> "40");
     }
 
-    @Autowired WebTestClient http;
+    @LocalServerPort int port;
     @Autowired JdbcTemplate jdbcTemplate;
+    @Autowired ObjectMapper objectMapper;
+
+    private final HttpClient http = HttpClient.newHttpClient();
 
     /**
      * 20 threads each attempt to transfer $10 from a $100 wallet simultaneously.
@@ -75,12 +94,12 @@ class ConcurrencyTest {
                 ready.countDown();
                 try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
 
-                HttpStatusCode status = doTransferRaw(
+                int status = doTransferRaw(
                         UUID.randomUUID().toString(), sourceId, destIds.get(idx), amount, "USD");
 
-                if (HttpStatus.CREATED.equals(status)) {
+                if (status == 201) {
                     successes.incrementAndGet();
-                } else if (HttpStatus.UNPROCESSABLE_ENTITY.equals(status)) {
+                } else if (status == 422) {
                     insufficientFunds.incrementAndGet();
                 } else {
                     unexpectedErrors.incrementAndGet();
@@ -135,18 +154,18 @@ class ConcurrencyTest {
             pool.submit(() -> {
                 ready.countDown();
                 try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-                HttpStatusCode status = doTransferRaw(
+                int status = doTransferRaw(
                         UUID.randomUUID().toString(), walletA, walletB, new BigDecimal("10.00"), "USD");
-                if (HttpStatus.CREATED.equals(status) || HttpStatus.UNPROCESSABLE_ENTITY.equals(status)) {
+                if (status == 201 || status == 422) {
                     completed.incrementAndGet();
                 }
             });
             pool.submit(() -> {
                 ready.countDown();
                 try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-                HttpStatusCode status = doTransferRaw(
+                int status = doTransferRaw(
                         UUID.randomUUID().toString(), walletB, walletA, new BigDecimal("10.00"), "USD");
-                if (HttpStatus.CREATED.equals(status) || HttpStatus.UNPROCESSABLE_ENTITY.equals(status)) {
+                if (status == 201 || status == 422) {
                     completed.incrementAndGet();
                 }
             });
@@ -155,7 +174,7 @@ class ConcurrencyTest {
         ready.await();
         start.countDown();
         pool.shutdown();
-        boolean finished = pool.awaitTermination(15, TimeUnit.SECONDS);
+        boolean finished = pool.awaitTermination(30, TimeUnit.SECONDS);
 
         assertThat(finished).as("All threads finished within timeout — no deadlock").isTrue();
         assertThat(completed.get())
@@ -172,40 +191,52 @@ class ConcurrencyTest {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     private UUID seedWallet(String ownerName, String currency, BigDecimal balance) {
-        WalletResponse wallet = http.post().uri("/api/v1/wallets")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(new CreateWalletRequest(ownerName, currency))
-                .exchange()
-                .expectStatus().isCreated()
-                .expectBody(WalletResponse.class)
-                .returnResult().getResponseBody();
-        assertThat(wallet).isNotNull();
-        if (balance.compareTo(BigDecimal.ZERO) > 0) {
-            jdbcTemplate.update("UPDATE wallets SET balance = ? WHERE id = ?::uuid",
-                    balance, wallet.id().toString());
+        try {
+            String body = objectMapper.writeValueAsString(new CreateWalletRequest(ownerName, currency));
+            HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/wallets"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            assertThat(response.statusCode()).isEqualTo(201);
+            WalletResponse wallet = objectMapper.readValue(response.body(), WalletResponse.class);
+            if (balance.compareTo(BigDecimal.ZERO) > 0) {
+                jdbcTemplate.update("UPDATE wallets SET balance = ? WHERE id = ?::uuid",
+                        balance, wallet.id().toString());
+            }
+            return wallet.id();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
-        return wallet.id();
     }
 
-    private HttpStatusCode doTransferRaw(String idempotencyKey,
-                                         UUID sourceId, UUID destId,
-                                         BigDecimal amount, String currency) {
-        return http.post().uri("/api/v1/transfers")
-                .header("Idempotency-Key", idempotencyKey)
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(new TransferRequest(sourceId, destId, amount, currency))
-                .exchange()
-                .returnResult(String.class)
-                .getStatus();
+    private int doTransferRaw(String idempotencyKey, UUID sourceId, UUID destId,
+                              BigDecimal amount, String currency) {
+        try {
+            String body = objectMapper.writeValueAsString(new TransferRequest(sourceId, destId, amount, currency));
+            HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/v1/transfers"))
+                    .header("Content-Type", "application/json")
+                    .header("Idempotency-Key", idempotencyKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            return response.statusCode();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private BigDecimal getBalance(UUID walletId) {
-        WalletResponse wallet = http.get().uri("/api/v1/wallets/{id}", walletId)
-                .exchange()
-                .expectStatus().isOk()
-                .expectBody(WalletResponse.class)
-                .returnResult().getResponseBody();
-        assertThat(wallet).isNotNull();
-        return wallet.balance();
+        try {
+            HttpRequest request = HttpRequest.newBuilder(
+                            URI.create("http://localhost:" + port + "/api/v1/wallets/" + walletId))
+                    .GET().build();
+            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+            assertThat(response.statusCode()).isEqualTo(200);
+            WalletResponse wallet = objectMapper.readValue(response.body(), WalletResponse.class);
+            return wallet.balance();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }
